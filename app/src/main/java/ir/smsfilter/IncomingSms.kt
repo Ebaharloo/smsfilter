@@ -52,8 +52,12 @@ class IncomingSms : BroadcastReceiver() {
             verdict = null
         }
 
-        // blocked senders are ads regardless of content
-        val blocked = Blocked.isBlocked(ctx, address)
+        // blocked senders and blocked keywords are spam regardless of content
+        val blocked = Blocked.isBlocked(ctx, address) || Blocked.matchesKeyword(ctx, body)
+        if (blocked && verdict?.label != Label.SPAM) {
+            // record it as spam so the Ads page can explain why it disappeared
+            verdict = Verdict(Label.SPAM, 99, listOf("blocked"), verdict?.norm ?: body)
+        }
         val isSpam = filtering && (blocked || verdict?.label == Label.SPAM)
 
         var stored = -1L
@@ -194,6 +198,25 @@ object Blocked {
 
     fun list(ctx: Context): Set<String> =
         ctx.getSharedPreferences(FILE, 0).getStringSet("numbers", emptySet())?.toSet().orEmpty()
+
+    /** keyword blocking: any message containing one of these is dropped like a blocked sender */
+    fun keywords(ctx: Context): Set<String> =
+        ctx.getSharedPreferences(FILE, 0).getStringSet("keywords", emptySet())?.toSet().orEmpty()
+
+    fun matchesKeyword(ctx: Context, body: String): Boolean {
+        val text = body.lowercase()
+        return keywords(ctx).any { it.isNotBlank() && text.contains(it.lowercase()) }
+    }
+
+    fun addKeyword(ctx: Context, keyword: String) {
+        val k = keyword.trim()
+        if (k.isEmpty()) return
+        ctx.getSharedPreferences(FILE, 0).edit().putStringSet("keywords", keywords(ctx) + k).apply()
+    }
+
+    fun removeKeyword(ctx: Context, keyword: String) {
+        ctx.getSharedPreferences(FILE, 0).edit().putStringSet("keywords", keywords(ctx) - keyword).apply()
+    }
 
     fun isBlocked(ctx: Context, address: String): Boolean {
         val digits = Contacts.digits(address)

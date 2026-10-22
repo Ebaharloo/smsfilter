@@ -2,6 +2,7 @@ package ir.smsfilter
 
 import ir.smsfilter.core.InboxPolicy
 import ir.smsfilter.core.Notify
+import ir.smsfilter.core.Tab
 import ir.smsfilter.core.ThreadRow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -20,6 +21,27 @@ class InboxPolicyTest {
     private val bank = row(1, "300017", "بانک ملی: واریز 12,000,000 ریال مانده 60,000,000", 5_000)
     private val ad = row(2, "9830009999", "تخفیف ویژه حراج کد تخفیف OFF50", 9_000)
     private val friend = row(3, "+989121234567", "سلام، فردا میبینمت", 7_000, unread = 2)
+
+    @Test
+    fun tabsSeparateCodesTransactionsAndPromotions() {
+        // codes win over money words, so an OTP that quotes an amount is never filed as a transaction
+        assertEquals(Tab.OTP, InboxPolicy.categoryOf("رمز پویا: 447711 مبلغ 3,100,000 ریال"))
+        assertEquals(Tab.TRANSACTIONS, InboxPolicy.categoryOf("بانک ملی: واریز 12,000,000 ریال مانده 60,000,000"))
+        assertEquals(Tab.PROMOTIONS, InboxPolicy.categoryOf("تخفیف ویژه حراج کد تخفیف OFF50"))
+        // «کد تخفیف» must not be mistaken for a verification code
+        assertEquals(Tab.PROMOTIONS, InboxPolicy.categoryOf("کد تخفیف OFF50 را وارد کنید"))
+        assertEquals(Tab.ALL, InboxPolicy.categoryOf("سلام، فردا میبینمت"))
+    }
+
+    @Test
+    fun tabFilterAndCountsAgree() {
+        val rows = listOf(bank, ad, friend)
+        assertEquals(listOf(1L), rows.filter { InboxPolicy.inTab(it, Tab.TRANSACTIONS) }.map { it.id })
+        assertEquals(listOf(1L, 2L, 3L), rows.filter { InboxPolicy.inTab(it, Tab.ALL) }.map { it.id })
+        assertEquals(3, rows.count { InboxPolicy.inTab(it, Tab.ALL) })
+        assertEquals(3, InboxPolicy.counts(rows)[Tab.ALL])
+        assertEquals(0, InboxPolicy.counts(rows)[Tab.OTP] ?: 0)
+    }
 
     @Test
     fun archivedConversationsLeaveTheInbox() {

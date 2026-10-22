@@ -114,6 +114,7 @@ enum class Page(val title: String) {
     Inbox("Inbox"),
     Archived("Archived"),
     Ads("Ads"),
+    Blocked("Blocked"),
     Test("Test a message"),
     Appearance("Appearance"),
     Settings("Settings")
@@ -204,6 +205,7 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
                             archivedMode = true
                         )
                         Page.Ads -> AdsPage(store, learned)
+                        Page.Blocked -> BlockedPage()
                         Page.Test -> TestPage(clf)
                         Page.Appearance -> AppearancePage(
                             theme = theme,
@@ -291,6 +293,100 @@ private fun AdRow(m: Msg, store: Store, learned: Learned, refresh: () -> Unit) {
 /** tiny holder so AdRow can reach a Context without threading it through every call */
 object LocalContextHolder {
     var ctx: android.content.Context? = null
+}
+
+/**
+ * MIUI-style blocklist: senders and keywords, each removable.
+ * Blocking never deletes: the message is quarantined and stays restorable on the Ads page.
+ */
+@Composable
+fun BlockedPage() {
+    val ctx = LocalContext.current
+    var numbers by remember { mutableStateOf(Blocked.list(ctx).sorted()) }
+    var keywords by remember { mutableStateOf(Blocked.keywords(ctx).sorted()) }
+    var number by remember { mutableStateOf("") }
+    var keyword by remember { mutableStateOf("") }
+    fun refresh() {
+        numbers = Blocked.list(ctx).sorted()
+        keywords = Blocked.keywords(ctx).sorted()
+    }
+
+    LazyColumn(
+        Modifier.fillMaxSize().padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        item {
+            Text("Blocked numbers", style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 14.dp))
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                OutlinedTextField(
+                    number, { number = it },
+                    label = { Text("number or shortcode") }, singleLine = true,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(
+                    enabled = number.trim().length >= 3,
+                    onClick = { Blocked.add(ctx, number.trim()); number = ""; refresh() }
+                ) { Text("Add") }
+            }
+        }
+        if (numbers.isEmpty()) {
+            item {
+                Text("Nothing blocked. Block from a conversation's ⋮ menu, or add a number here.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        items(numbers) { n ->
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                Text(n, style = MaterialTheme.typography.bodyLarge)
+                TextButton(onClick = { Blocked.remove(ctx, n); refresh() }) { Text("Unblock") }
+            }
+        }
+        item {
+            Divider(Modifier.padding(vertical = 8.dp))
+            Text("Blocked keywords", style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                OutlinedTextField(
+                    keyword, { keyword = it },
+                    label = { Text("any message containing…") }, singleLine = true,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(
+                    enabled = keyword.trim().length >= 2,
+                    onClick = { Blocked.addKeyword(ctx, keyword); keyword = ""; refresh() }
+                ) { Text("Add") }
+            }
+        }
+        if (keywords.isEmpty()) {
+            item {
+                Text("No keywords yet. A keyword blocks every message that contains it — including verification codes.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        items(keywords) { k ->
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                Text(k, style = MaterialTheme.typography.bodyLarge)
+                TextButton(onClick = { Blocked.removeKeyword(ctx, k); refresh() }) { Text("Unblock") }
+            }
+        }
+        item {
+            Divider(Modifier.padding(vertical = 8.dp))
+            Text("Blocked messages are never deleted — they are kept on the Ads page, where one tap restores them.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 24.dp))
+        }
+    }
 }
 
 @Composable

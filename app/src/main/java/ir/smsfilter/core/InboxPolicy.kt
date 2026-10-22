@@ -18,7 +18,58 @@ data class ThreadRow(
 
 enum class Notify { NORMAL, DIGEST, SILENT }
 
+/** inbox tabs, mirroring MIUI's "promotional / financial messages in separate tabs" */
+enum class Tab(val label: String) {
+    ALL("All"),
+    TRANSACTIONS("Transactions"),
+    OTP("Codes"),
+    PROMOTIONS("Promotions")
+}
+
 object InboxPolicy {
+
+    /**
+     * Which tab a conversation belongs to, from its newest message.
+     * Order matters: a bank message contains «خرید» and an ad contains «کد تخفیف»,
+     * so codes win over transactions and promotions can never swallow a real code.
+     */
+    fun categoryOf(snippet: String): Tab {
+        val s = snippet.lowercase()
+        return when {
+            OTP_MARKERS.any { s.contains(it) } -> Tab.OTP
+            TX_MARKERS.any { s.contains(it) } -> Tab.TRANSACTIONS
+            PROMO_MARKERS.any { s.contains(it) } -> Tab.PROMOTIONS
+            else -> Tab.ALL
+        }
+    }
+
+    fun inTab(row: ThreadRow, tab: Tab): Boolean =
+        tab == Tab.ALL || categoryOf(row.snippet) == tab
+
+    /** counts per tab, for the chip labels */
+    fun counts(rows: List<ThreadRow>): Map<Tab, Int> {
+        val out = HashMap<Tab, Int>()
+        rows.forEach { out[categoryOf(it.snippet)] = (out[categoryOf(it.snippet)] ?: 0) + 1 }
+        out[Tab.ALL] = rows.size
+        return out
+    }
+
+    private val OTP_MARKERS = listOf(
+        "رمز پویا", "رمز یکبار", "رمز یک بار", "رمز دوم", "رمز دوم کارت", "رمز اینترنتی",
+        "کد تایید", "کد تأیید", "کد فعالسازی", "کد فعال سازی", "کد ورود", "کد امنیتی",
+        "کد یکبار", "otp", "verification code", "cvv2"
+    )
+
+    private val TX_MARKERS = listOf(
+        "واریز", "برداشت", "مانده", "موجودی", "تراکنش", "انتقال", "کارت به کارت",
+        "خرید", "پرداخت", "ریال", "تومان", "صورتحساب", "قسط", "اعلام وصول"
+    )
+
+    private val PROMO_MARKERS = listOf(
+        "تخفیف", "حراج", "فروش ویژه", "ویژه", "هدیه", "برنده", "قرعه", "جایزه",
+        "لغو ۱۱", "لغو11", "لغو اشتراک", "وام", "بدون ضامن", "کلیک کنید", "ثبت نام",
+        "ثبت‌نام", "ارسال رایگان", "مشاوره", "سرمایه", "درآمد", "کد تخفیف"
+    )
 
     /** archived rows are hidden from the inbox and shown only in the archive view */
     fun visible(

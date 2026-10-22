@@ -9,6 +9,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -98,12 +101,22 @@ fun Avatar(
                 .background(tint ?: if (neutral) NEUTRAL_AVATAR else avatarColor(address)),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                initialsOf(address),
-                color = if (neutral) NEUTRAL_INITIALS else Color.White,
-                fontWeight = FontWeight.Medium,
-                fontSize = fallbackFontSize.sp
-            )
+            // shortcodes have no name to initialise: a person glyph reads as "sender",
+            // digits would read as an unread count next to the real badge
+            if (address.none { it.isLetter() }) {
+                Icon(
+                    Icons.Filled.Person, contentDescription = null,
+                    tint = if (neutral) NEUTRAL_INITIALS else Color.White,
+                    modifier = Modifier.size(size * 0.5f)
+                )
+            } else {
+                Text(
+                    initialsOf(address),
+                    color = if (neutral) NEUTRAL_INITIALS else Color.White,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = fallbackFontSize.sp
+                )
+            }
         }
     }
 }

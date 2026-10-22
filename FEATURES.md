@@ -15,7 +15,7 @@ Legend: ✅ done · 🟡 partial · ⬜ missing
 | 7 | Delete conversation | ✅ |
 | 8 | Mark read / unread manually | ✅ |
 | 9 | Multi-select + bulk delete/archive | ✅ |
-| 10 | Category tabs (All / OTP / Transactions / Ads) | 🟡 (Ads page only) |
+| 10 | Category tabs (All / Transactions / Codes / Promotions) | ✅ (counts per chip, pure `InboxPolicy.categoryOf`) |
 | 11 | Swipe actions on rows | ✅ |
 
 ## Thread
@@ -49,7 +49,7 @@ Legend: ✅ done · 🟡 partial · ⬜ missing
 | 29 | Spam never written to inbox, kept in Ads folder | ✅ |
 | 30 | Why-it-was-filtered shown per message | ✅ |
 | 31 | Teach: "this is important" / "this is an ad" | ✅ |
-| 32 | Allowlist / blocklist management page | ⬜ |
+| 32 | Allowlist / blocklist management page | 🟡 (blocklist + keywords done; allowlist still prefs-only) |
 | 33 | Auto-delete ads after N days | ⬜ |
 | 34 | Contact messages never content-filtered | ✅ |
 
@@ -60,7 +60,7 @@ Legend: ✅ done · 🟡 partial · ⬜ missing
 | 36 | Default SMS role request | ✅ |
 | 37 | Backup / export messages | ⬜ |
 | 38 | Per-conversation sound / vibrate | ⬜ |
-| 39 | Block list page | ⬜ |
+| 39 | Block list page | ✅ (numbers + keywords, unblock, quarantined not deleted) |
 
 ## Tiers
 - **T1 (next):** 17, 20, 16, 25, 26, 27, 14, 8, 13 delivery status — the features you notice within five minutes of daily use.

@@ -11,6 +11,8 @@ import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -52,6 +55,7 @@ import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -84,6 +88,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ir.smsfilter.core.InboxPolicy
+import ir.smsfilter.core.Tab
 import ir.smsfilter.core.ThreadRow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -204,6 +209,7 @@ fun ConversationsPage(
     var muted by remember { mutableStateOf(setOf<Long>()) }
     var archived by remember { mutableStateOf(setOf<Long>()) }
     var query by remember { mutableStateOf("") }
+    var tab by remember { mutableStateOf(Tab.ALL) }
     var reload by remember { mutableStateOf(0) }
     var selection by remember { mutableStateOf(setOf<Long>()) }
     var newMessage by remember { mutableStateOf(false) }
@@ -224,11 +230,12 @@ fun ConversationsPage(
     }
 
     // list rules stay in InboxPolicy so they are unit-tested without Android
-    val base = InboxPolicy.order(
+    val ordered = InboxPolicy.order(
         InboxPolicy.visible(threads.map { it.toRow() }, archived, archivedMode, query, names),
         pinned
     )
-    val shown = base
+    val tabCounts = InboxPolicy.counts(ordered)
+    val shown = ordered.filter { InboxPolicy.inTab(it, tab) }
 
     fun archiveThreads(ids: Set<Long>) = scope.launch {
         withContext(Dispatchers.IO) { ids.forEach { ThreadFlags.setArchived(ctx, it, !archivedMode) } }
@@ -269,13 +276,34 @@ fun ConversationsPage(
                 }
             } else {
                 SearchPill(query) { query = it }
+                // MIUI-style tabs: ads and bank/code traffic separated from people
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                        .padding(start = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Tab.entries.forEach { t ->
+                        val n = tabCounts[t] ?: 0
+                        FilterChip(
+                            selected = tab == t,
+                            onClick = { tab = t },
+                            label = { Text("${t.label} $n", fontSize = 13.sp) }
+                        )
+                    }
+                    // keeps the last chip fully visible when the row is scrolled to the end
+                    Spacer(Modifier.width(12.dp))
+                }
             }
 
             if (shown.isEmpty()) {
                 Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(if (archivedMode) "No archived conversations" else "No messages",
-                        style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (archivedMode) "No archived conversations"
+                        else if (tab == Tab.ALL) "No messages"
+                        else "Nothing in ${tab.label}",
+                        style = MaterialTheme.typography.titleMedium
+                    )
                     Text(
                         if (archivedMode) "Swipe a conversation left to archive it."
                         else "New SMS will show up here.",
@@ -360,30 +388,34 @@ fun ConversationsPage(
     }
 }
 
-/** MIUI search field: pill, filled surface, no border */
+/** MIUI search field: filled surface, small radius, no border */
 @Composable
 private fun SearchPill(query: String, onChange: (String) -> Unit) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(24.dp),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).height(48.dp)
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp).height(44.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 16.dp)) {
+            modifier = Modifier.padding(horizontal = 14.dp)) {
             Icon(Icons.Filled.Search, contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(19.dp))
             BasicTextField(
                 value = query,
                 onValueChange = onChange,
                 singleLine = true,
-                textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp),
-                modifier = Modifier.weight(1f).padding(start = 12.dp),
+                textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp),
+                modifier = Modifier.weight(1f).padding(start = 10.dp),
                 decorationBox = { inner ->
-                    if (query.isEmpty()) Text("Search messages", fontSize = 16.sp,
+                    if (query.isEmpty()) Text("Search messages", fontSize = 15.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     inner()
                 }
             )
+            if (query.isNotEmpty()) IconButton(onClick = { onChange("") }, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Filled.Close, contentDescription = "clear",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+            }
         }
     }
 }
@@ -472,34 +504,17 @@ private fun ConversationRow(
                 )
                 if (muted) Text("muted", fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(end = 6.dp))
-                Text(
-                    timeLabel(row.date),
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                    modifier = Modifier.padding(start = 6.dp))
             }
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 3.dp)) {
-                val snippet = row.snippet.replace('\n', ' ')
-                Text(
-                    if (isPersian(snippet)) rtlIsolated(snippet) else snippet,
-                    fontSize = 15.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = if (isPersian(snippet)) TextAlign.Right else TextAlign.Start,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                if (row.unread > 0) {
-                    Box(
-                        Modifier.padding(start = 8.dp).height(18.dp).widthIn(min = 18.dp)
-                            .clip(RoundedCornerShape(5.dp)).background(BADGE_GREY),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("${row.unread}", color = Color.White, fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
-                    }
-                }
-            }
+            val snippet = row.snippet.replace('\n', ' ')
+            Text(
+                if (isPersian(snippet)) rtlIsolated(snippet) else snippet,
+                fontSize = 15.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = if (isPersian(snippet)) TextAlign.Right else TextAlign.Start,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 3.dp)
+            )
             // which SIM the newest message of this thread arrived on
             if (multiSim() && simId >= 0) {
                 Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -507,6 +522,27 @@ private fun ConversationRow(
                     Text("SIM ${simLabel(simId) ?: ""}", fontSize = 11.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 4.dp))
+                }
+            }
+        }
+        // time above the badge, both flush right: the preview never runs under them
+        Column(
+            Modifier.padding(start = 10.dp),
+            horizontalAlignment = Alignment.End
+        ) {
+            Text(
+                timeLabel(row.date),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (row.unread > 0) {
+                Box(
+                    Modifier.padding(top = 6.dp).height(18.dp).widthIn(min = 18.dp)
+                        .clip(RoundedCornerShape(5.dp)).background(BADGE_GREY),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("${row.unread}", color = Color.White, fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
                 }
             }
         }
