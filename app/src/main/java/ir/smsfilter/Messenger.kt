@@ -256,6 +256,7 @@ fun ConversationsPage(
     var newMessage by remember { mutableStateOf(false) }
     var simByThread by remember { mutableStateOf(mapOf<Long, Int>()) }
     var contactSuffixes by remember { mutableStateOf(setOf<String>()) }
+    var spamIds by remember { mutableStateOf(setOf<Long>()) }
     val snack = remember { SnackbarHostState() }
 
     LaunchedEffect(reload) {
@@ -268,6 +269,7 @@ fun ConversationsPage(
         }
         simByThread = loaded.associate { it.id to it.simId }
         contactSuffixes = withContext(Dispatchers.IO) { Contacts.suffixes(ctx) }
+        spamIds = ThreadFlags.spamThreads(ctx)
         names = withContext(Dispatchers.IO) {
             val bySuffix = Contacts.namesFor(ctx)
             loaded.associate { it.address to bySuffix[Contacts.suffixOf(it.address)] }
@@ -276,7 +278,7 @@ fun ConversationsPage(
 
     // list rules stay in InboxPolicy so they are unit-tested without Android
     val ordered = InboxPolicy.order(
-        InboxPolicy.visible(threads.map { it.toRow() }, archived, archivedMode, query, names),
+        InboxPolicy.visible(threads.map { it.toRow() }, archived, archivedMode, query, names, spamIds),
         pinned
     )
     val tabCounts = InboxPolicy.counts(ordered, contactSuffixes)
@@ -307,10 +309,11 @@ fun ConversationsPage(
             if (row.snippet.isNotBlank()) learned?.markAd(row.address, row.snippet)
             store?.add(row.address, row.snippet, Verdict(Label.SPAM, 99, listOf("user:ad"), row.snippet), row.date)
             ThreadFlags.setArchived(ctx, row.id, true)
+            ThreadFlags.markSpam(ctx, row.id)
             Sms.markThreadRead(ctx, row.id)
         }
         reload++
-        snack.showSnackbar("Marked as ad — the filter learned from it")
+        snack.showSnackbar("Moved to Ads — the filter learned from it")
     }
 
     fun toggleRead(row: ThreadRow) = scope.launch {
@@ -945,7 +948,10 @@ fun ThreadPage(threadId: Long, address: String, learned: Learned? = null, onBack
                             if (sample.isNotBlank()) learned?.markAd(address, sample)
                             scope.launch {
                                 withContext(Dispatchers.IO) {
-                                    if (resolvedId > 0) ThreadFlags.setArchived(ctx, resolvedId, true)
+                                    if (resolvedId > 0) {
+                                        ThreadFlags.setArchived(ctx, resolvedId, true)
+                                        ThreadFlags.markSpam(ctx, resolvedId)
+                                    }
                                 }
                                 onBack()
                             }
@@ -1175,7 +1181,10 @@ fun ThreadPage(threadId: Long, address: String, learned: Learned? = null, onBack
                             val verdict = Verdict(Label.SPAM, 99, listOf("user:ad"), m.body)
                             Store(ctx).add(address, m.body, verdict, m.date)
                             Sms.deleteMessage(ctx, m.id)
-                            if (resolvedId > 0) ThreadFlags.setArchived(ctx, resolvedId, true)
+                            if (resolvedId > 0) {
+                                ThreadFlags.setArchived(ctx, resolvedId, true)
+                                ThreadFlags.markSpam(ctx, resolvedId)
+                            }
                         }
                         selected = null
                         onBack()

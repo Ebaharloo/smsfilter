@@ -54,6 +54,16 @@ class InboxPolicyTest {
     }
 
     @Test
+    fun spamMarkedConversationsLeaveBothInboxAndArchive() {
+        val rows = listOf(bank, ad, friend)
+        // archived by the user: only in Archive
+        assertEquals(listOf(2L), InboxPolicy.visible(rows, setOf(2), true).map { it.id })
+        // marked as advertising: in neither list, it belongs to the Ads page
+        assertEquals(listOf(1L, 3L), InboxPolicy.visible(rows, emptySet(), false, spamIds = setOf(2)).map { it.id })
+        assertEquals(0, InboxPolicy.visible(rows, setOf(2), true, spamIds = setOf(2)).size)
+    }
+
+    @Test
     fun searchMatchesNumberBodyAndContactName() {
         val rows = listOf(bank, ad, friend)
         val names = mapOf("+989121234567" to "Ali")

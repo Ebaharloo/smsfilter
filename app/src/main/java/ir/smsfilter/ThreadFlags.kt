@@ -72,4 +72,17 @@ object ThreadFlags {
     }
 
     fun locallyArchived(ctx: Context): Set<Long> = ids(ctx, "archived_local")
+
+    /** conversations moved to the Ads page: hidden from the inbox AND from Archive */
+    fun spamThreads(ctx: Context): Set<Long> = ids(ctx, "spam_threads")
+
+    fun markSpam(ctx: Context, threadId: Long) {
+        val now = ids(ctx, "spam_threads")
+        if (threadId !in now) store(ctx, "spam_threads", now + threadId)
+    }
+
+    fun unmarkSpam(ctx: Context, threadId: Long) {
+        val now = ids(ctx, "spam_threads")
+        if (threadId in now) store(ctx, "spam_threads", now - threadId)
+    }
 }

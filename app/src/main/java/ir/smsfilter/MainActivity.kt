@@ -162,6 +162,11 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
+    // one-time-ish repair: ads filtered before the Ads-page split are still listed in Archive
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { InboxScan.markKnownSpamThreads(ctx, store) }
+    }
+
     // system back must walk the app's own stack: thread -> list, page -> inbox, not finish()
     BackHandler(enabled = thread != null || page != Page.Inbox) {
         if (thread != null) thread = null else page = Page.Inbox
@@ -425,6 +430,11 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                                         store.relabel(m.id, Label.IMPORTANT)
                                         learned.markImportant(m.sender)
                                         Sms.insertInbox(ctx, m.sender, m.text, m.ts)
+                                        val tid = Sms.threadIdFor(ctx, m.sender)
+                                        if (tid != null) {
+                                            ThreadFlags.unmarkSpam(ctx, tid)
+                                            ThreadFlags.setArchived(ctx, tid, false)
+                                        }
                                     }
                                     refresh()
                                     snack.showSnackbar("Restored to inbox")

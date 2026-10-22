@@ -72,8 +72,26 @@ object InboxScan {
 
         threads.forEach { tid ->
             ThreadFlags.setArchived(ctx, tid, true)
+            ThreadFlags.markSpam(ctx, tid)
             Sms.markThreadRead(ctx, tid)
         }
         return Result(scanned = scanned, spam = spam, threads = threads.size)
+    }
+
+    /**
+     * Conversations whose messages are already in our spam store must not sit in Archive.
+     * Runs on app start so ads filtered before the Ads-page split move out of Archive too.
+     */
+    fun markKnownSpamThreads(ctx: Context, store: Store, limit: Int = 500) {
+        val senders = try {
+            store.list(Label.SPAM, limit).map { it.sender }.distinct()
+        } catch (t: Throwable) {
+            return
+        }
+        senders.forEach { sender ->
+            val tid = Sms.threadIdFor(ctx, sender) ?: return@forEach
+            ThreadFlags.markSpam(ctx, tid)
+            ThreadFlags.setArchived(ctx, tid, true)
+        }
     }
 }

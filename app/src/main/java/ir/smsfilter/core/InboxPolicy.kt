@@ -91,9 +91,14 @@ object InboxPolicy {
         archivedIds: Set<Long>,
         archivedMode: Boolean,
         query: String = "",
-        names: Map<String, String?> = emptyMap()
+        names: Map<String, String?> = emptyMap(),
+        spamIds: Set<Long> = emptySet()
     ): List<ThreadRow> {
-        val scoped = rows.filter { if (archivedMode) it.id in archivedIds else it.id !in archivedIds }
+        // a conversation the user (or a sweep) marked as advertising belongs to the Ads page only:
+        // showing it in Archive as well made the swipe look like it did nothing
+        val scoped = rows.filter {
+            it.id !in spamIds && if (archivedMode) it.id in archivedIds else it.id !in archivedIds
+        }
         if (query.isBlank()) return scoped
         return scoped.filter { row ->
             row.address.contains(query, true) ||
