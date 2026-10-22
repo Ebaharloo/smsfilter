@@ -1,0 +1,259 @@
+{
+  "version": 1,
+  "note": "Single source of truth for rules. Read by the Android app (assets) and by tools/mirror.py. Keep keys identical in both.",
+  "guard": {
+    "_comment": "Any hit => IMPORTANT, filtering stops. Asymmetric cost: one lost bank/OTP message is worse than 1000 spam. bank_relationship catches bank notices that mention تسهیلات/اقساط (measured: 43 false filters on 10k real msgs).",
+    "otp": [
+      "رمز پویا",
+      "رمز یکبار مصرف",
+      "رمز یک بار مصرف",
+      "رمز یکبارمصرف",
+      "کد تایید",
+      "کد تأیید",
+      "کد فعالسازی",
+      "کد فعال سازی",
+      "کد ورود",
+      "کد امنیتی",
+      "رمز دوم",
+      "رمز اینترنتی",
+      "رمز عبور یکبار",
+      "cvv2",
+      "otp",
+      "verification code",
+      "one time password"
+    ],
+    "transaction": [
+      "واریز",
+      "برداشت",
+      "مانده",
+      "موجودی",
+      "تراکنش",
+      "کارت به کارت",
+      "حساب شما",
+      "انتقال وجه"
+    ],
+    "gov": [
+      "ابلاغ",
+      "ثنا",
+      "قوه قضاییه",
+      "قوه قضائیه",
+      "احضاریه",
+      "مالیات",
+      "بیمه",
+      "تامین اجتماعی",
+      "تأمین اجتماعی",
+      "پلیس",
+      "دادگستری",
+      "ثبت احوال",
+      "نیروی انتظامی",
+      "سامانه دولت",
+      "خدمات قضایی"
+    ],
+    "service": [
+      "مرسوله",
+      "کد رهگیری",
+      "پیگیری مرسوله",
+      "تحویل",
+      "نوبت",
+      "لغو نوبت",
+      "قرار ملاقات",
+      "پرواز",
+      "بلیط",
+      "پذیرش",
+      "آزمایشگاه",
+      "نسخه"
+    ],
+    "_transaction_note": "not absolute: only blocks filtering when an amount is present (real transaction SMS always has one). Amount regex lives in thresholds.amount_regex.",
+    "bank_relationship": [
+      "مشتری گرامی",
+      "مشتري گرامي",
+      "شعبه",
+      "سررسید",
+      "کارمزد",
+      "صورتحساب",
+      "شماره حساب",
+      "حساب شما",
+      "بانک",
+      "ATM",
+      "رمز کارت",
+      "کارت شما",
+      "درخواست شما ثبت",
+      "کد پیگیری درخواست"
+    ],
+    "public_service": [
+      "هموطن",
+      "ویروس کرونا",
+      "پیشگیری از ابتلا",
+      "قطعی آب",
+      "قطعی برق",
+      "اطلاعیه"
+    ],
+    "telecom": [
+      "همراه اولی عزیز",
+      "ایرانسل",
+      "همراه اول",
+      "رایتل",
+      "بسته اینترنت شما",
+      "شارژ شما",
+      "قبض تلفن"
+    ]
+  },
+  "spam": {
+    "optout": {
+      "_comment": "Iranian CRA mandates this on service SMS as well, so it is a weak signal, not proof (was 6).",
+      "weight": 2,
+      "terms": [
+        "لغو11",
+        "لغو 11",
+        "لغو ۱۱",
+        "لغو11 ",
+        "برای لغو",
+        "لغو اشتراک",
+        "لغو پیام",
+        "لغو تبلیغ"
+      ]
+    },
+    "promo": {
+      "weight": 2,
+      "terms": [
+        "تخفیف",
+        "حراج",
+        "فروش ویژه",
+        "پیشنهاد ویژه",
+        "فرصت محدود",
+        "ارسال رایگان",
+        "کد تخفیف",
+        "جشنواره",
+        "فقط امروز",
+        "بهترین قیمت",
+        "نمایشگاه",
+        "بازگشایی",
+        "افتتاحیه",
+        "هدیه",
+        "برنده",
+        "قرعه کشی",
+        "جایزه",
+        "کلیک کنید",
+        "ثبت نام کنید",
+        "لینک زیر",
+        "اطلاعات بیشتر",
+        "مشاوره رایگان",
+        "رزرو کنید",
+        "همین حالا"
+      ]
+    },
+    "finance": {
+      "weight": 3,
+      "terms": [
+        "وام",
+        "تسهیلات",
+        "بدون ضامن",
+        "بدون چک",
+        "اقساط",
+        "سود ماهانه",
+        "سرمایه گذاری",
+        "ارز دیجیتال",
+        "بیت کوین",
+        "فارکس",
+        "سیگنال",
+        "پر سود",
+        "پرسود",
+        "درآمد ماهانه",
+        "کسب درآمد",
+        "پولدار",
+        "سود تضمینی",
+        "سود روزانه"
+      ]
+    },
+    "gambling": {
+      "weight": 5,
+      "terms": [
+        "شرط بندی",
+        "شرطبندی",
+        "کازینو",
+        "پوکر",
+        "انفجار",
+        "گردونه شانس",
+        "بازی انفجار",
+        "سایت شرط"
+      ]
+    },
+    "health": {
+      "weight": 2,
+      "terms": [
+        "لاغری",
+        "چاقی",
+        "تناسب اندام",
+        "کاهش وزن",
+        "دمنوش",
+        "مکمل",
+        "قرص لاغری",
+        "افزایش قد",
+        "روشن کردن پوست"
+      ]
+    },
+    "realestate": {
+      "weight": 2,
+      "terms": [
+        "پیش فروش",
+        "برج",
+        "واحد لوکس",
+        "کلید نخورده",
+        "سرمایه گذاری در ملک",
+        "زمین ارزان"
+      ]
+    }
+  },
+  "structure": {
+    "url_weight": 2,
+    "shortlink_weight": 3,
+    "shortlink_hosts": [
+      "t.me",
+      "bit.ly",
+      "tinyurl",
+      "zil.ink",
+      "cutt.ly",
+      "is.gd",
+      "hop.clickbank",
+      "wa.me",
+      "instagram.com",
+      "tiktok.com"
+    ],
+    "emoji_ge5_weight": 1,
+    "repeat_punct_weight": 1,
+    "unknown_sender_weight": 1,
+    "spaced_letters_weight": 2
+  },
+  "thresholds": {
+    "spam": 6,
+    "unsure": 3,
+    "short_message_chars": 25,
+    "amount_regex": "\\d[\\d,.]{3,}\\s*(ریال|تومان|IRR|IRT)?|\\d{1,3}(,\\d{3})+"
+  },
+  "senders": {
+    "allow_exact": [],
+    "allow_contains": [
+      "بانک",
+      "Bank",
+      "بیمه",
+      "پست",
+      "ایرانسل",
+      "همراه اول",
+      "رایتل",
+      "دیجی‌کالا",
+      "اسنپ"
+    ],
+    "block_exact": []
+  },
+  "model": {
+    "spam_p": 0.5,
+    "unsure_p": 0.3,
+    "soft_guard_conf": 0.9,
+    "_comment": "Measured on 10,031 real Persian messages: soft guard (telecom/service/bank/public) only protects when model p<0.9, otherwise it was leaking 27pp of ads. Hard guard (otp/gov/transaction-with-amount) always protects. Result: spam recall 0.88, important kept 0.983."
+  },
+  "guard_hard": [
+    "otp",
+    "gov",
+    "transaction"
+  ]
+}

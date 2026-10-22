@@ -1,0 +1,16 @@
+{"text": "رمز پویا: 482913️ مبلغ 1,250,000 ریال کد تایید را در سامانه وارد کنید", "sender": "90001111", "label": "IMPORTANT", "note": "synthetic otp"}
+{"text": "بانک ملت: واریز 25,000,000 ریال به حساب 1234 موجودی 90,120,000 ریال", "sender": "Bank Melli", "label": "IMPORTANT", "note": "synthetic bank"}
+{"text": "قوه قضاییه: جهت مشاهده ابلاغیه خود به سامانه ثنا مراجعه کنید", "sender": "Sana", "label": "IMPORTANT", "note": "synthetic gov"}
+{"text": "مرسوله پستی شما با کد رهگیری 123456789 به دفتر پست تحویل داده شد", "sender": "Post", "label": "IMPORTANT", "note": "synthetic delivery"}
+{"text": "نوبت شما در درمانگاه شهید رجایی فردا ساعت 10:30 می باشد. لغو نوبت: 011", "sender": "0222222", "label": "IMPORTANT", "note": "synthetic appointment - has لغو but not لغو11"}
+{"text": "سلام بابا شب میای؟ غذا بگیرم؟", "sender": "+989121234567", "contacts": ["+989121234567"], "label": "IMPORTANT", "note": "synthetic family contact"}
+{"text": "🔥تخفیف ویژه🔥 50% حراج لباس کد تخفیف OFF50 همین حالا کلیک کنید t.me/xyz لغو11", "sender": "+989351112233", "label": "SPAM", "note": "synthetic promo"}
+{"text": "وام بدون ضامن بدون چک تسهیلات 200 میلیون تومان! مشاوره رایگان کلیک کنید bit.ly/abc لغو11", "sender": "9830001234", "label": "SPAM", "note": "synthetic loan"}
+{"text": "درآمد ماهانه 50 میلیون! سرمایه گذاری در ارز دیجیتال، سیگنال فارکس، ثبت نام کنید zil.ink/x", "sender": "+989371234567", "label": "SPAM", "note": "synthetic finance"}
+{"text": "فروش ویژه برج لوکس، پیش فروش واحد لوکس کلید نخورده، اطلاعات بیشتر کلیک کنید", "sender": "+989191234567", "label": "SPAM", "note": "synthetic realestate"}
+{"text": "لاغری با دمنوش گیاهی، کاهش وزن تضمینی، ارسال رایگان، سفارش t.me/slim", "sender": "20001234", "label": "SPAM", "note": "synthetic health"}
+{"text": "گردونه شانس! هر خرید یک برنده، کازینو آنلاین شرط بندی انفجار همین حالا کلیک کنید", "sender": "+989121112233", "label": "SPAM", "note": "synthetic gambling"}
+{"text": "قرعه کشی بزرگ، برنده جایزه 100 میلیونی، ثبت نام کنید، لغو 11", "sender": "9830009999", "label": "SPAM", "note": "synthetic lottery, spaced optout"}
+{"text": "واریز سود تضمینی 30% سرمایه گذاری بدون ریسک، ثبت نام کنید t.me/fin", "sender": "+989301234567", "label": "UNSURE", "note": "scam; model unsure (p<0.5) -> passes with marker, safe direction"}
+{"text": "تخفیف 20% روی خدمات ما", "sender": "+989361234567", "label": "SPAM", "note": "short promo; model confident (p=0.93) -> filtered, as intended"}
+{"text": "ت خ ف ی ف ویژه فقط امروز، حراج بزرگ", "sender": "+989391112233", "label": "SPAM", "note": "spaced-letter evasion"}
