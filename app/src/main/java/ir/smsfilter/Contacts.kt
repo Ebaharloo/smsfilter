@@ -10,6 +10,41 @@ import android.provider.ContactsContract
  */
 object Contacts {
 
+    /** a device contact, as the recipient picker needs it */
+    data class Person(val name: String, val number: String)
+
+    /**
+     * All phone numbers in the address book, name-sorted, deduped by number.
+     * Returns an empty list when READ_CONTACTS is missing, so callers fall back to typing a number.
+     */
+    fun all(ctx: Context, limit: Int = 3000): List<Person> {
+        val out = LinkedHashMap<String, Person>()
+        try {
+            ctx.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                arrayOf(
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    ContactsContract.CommonDataKinds.Phone.NUMBER
+                ),
+                null, null, null
+            )?.use { c ->
+                while (c.moveToNext() && out.size < limit) {
+                    val name = c.getString(0)?.trim().orEmpty()
+                    val number = c.getString(1)?.trim().orEmpty()
+                    val key = digits(number).takeLast(9)
+                    if (key.length < 4 || number.isBlank()) continue
+                    val label = name.ifBlank { number }
+                    // a contact with several numbers keeps one row per number
+                    out.putIfAbsent(key + "|" + label, Person(label, number))
+                }
+            }
+        } catch (t: Throwable) {
+            return emptyList()
+        }
+        return out.values.sortedBy { it.name.lowercase() }
+    }
+
+
     fun suffixes(ctx: Context): Set<String> {
         val out = HashSet<String>(512)
         try {

@@ -165,8 +165,41 @@ object Sms {
         val sm = ctx.getSystemService(android.telephony.SubscriptionManager::class.java)
         val list = sm.activeSubscriptionInfoList
         android.util.Log.i("SMSSim", "active subs=${list?.size ?: -1}")
-        list.orEmpty().map { info ->
+        val fromManager = list.orEmpty().map { info ->
             info.subscriptionId to (info.displayName?.toString() ?: "SIM ${info.simSlotIndex + 1}")
+        }
+        // MIUI hands out an empty info list even to the default SMS app. Fall back to the sub ids
+        // actually present in the provider (plus the default one) and label them by slot.
+        fromManager.ifEmpty {
+            val ids = LinkedHashSet<Int>()
+            try {
+                ids += SubscriptionManager.getDefaultSmsSubscriptionId()
+            } catch (t: Throwable) {
+            }
+            val col = detectSimColumn(ctx)
+            if (col.isNotEmpty()) {
+                try {
+                    ctx.contentResolver.query(
+                        Telephony.Sms.CONTENT_URI, arrayOf(col), null, null, null
+                    )?.use { c ->
+                        var rows = 0
+                        while (c.moveToNext() && rows < 2000) {
+                            rows++
+                            val v = c.getInt(0)
+                            if (v >= 0) ids += v
+                        }
+                    }
+                } catch (t: Throwable) {
+                }
+            }
+            ids.filter { it >= 0 }.map { sub ->
+                val slot = try {
+                    SubscriptionManager.getSlotIndex(sub)
+                } catch (t: Throwable) {
+                    -1
+                }
+                sub to (if (slot >= 0) "SIM ${slot + 1}" else "SIM $sub")
+            }
         }
     } catch (t: Throwable) {
         emptyList()

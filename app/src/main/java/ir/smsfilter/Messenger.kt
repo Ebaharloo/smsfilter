@@ -10,6 +10,7 @@ import android.provider.Telephony
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -63,6 +65,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
@@ -87,6 +90,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import ir.smsfilter.core.InboxPolicy
 import ir.smsfilter.core.Tab
 import ir.smsfilter.core.ThreadRow
@@ -275,7 +280,7 @@ fun ConversationsPage(
                     TextButton(onClick = { deleteThreads(selection) }) { Text("Delete") }
                 }
             } else {
-                SearchPill(query) { query = it }
+                SearchPill(query, { query = it })
                 // MIUI-style tabs: ads and bank/code traffic separated from people
                 Row(
                     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
@@ -366,31 +371,153 @@ fun ConversationsPage(
     }
 
     if (newMessage) {
-        var number by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { newMessage = false },
-            title = { Text("New message") },
-            text = {
-                OutlinedTextField(
-                    number, { number = it },
-                    label = { Text("phone number") },
-                    singleLine = true
-                )
-            },
-            confirmButton = {
-                TextButton(enabled = Contacts.digits(number).length >= 4, onClick = {
-                    newMessage = false
-                    onOpenThread(-1L, number)
-                }) { Text("Open") }
-            },
-            dismissButton = { TextButton(onClick = { newMessage = false }) { Text("Cancel") } }
+        RecipientPicker(
+            onPick = { number -> newMessage = false; onOpenThread(-1L, number) },
+            onDismiss = { newMessage = false }
         )
+    }
+}
+
+/** MIUI-style SIM chooser: a sheet with each SIM, its slot, and the current pick ticked. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SimPickerSheet(
+    selected: Int?,
+    title: String = "Send with",
+    onPick: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val ctx = LocalContext.current
+    val sims = remember { Sms.sims(ctx) }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            Text(title, fontSize = 17.sp, fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
+            if (sims.isEmpty()) {
+                Text("No SIM information available", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+            }
+            sims.forEach { (sub, label) ->
+                Row(
+                    Modifier.fillMaxWidth().clickable { onPick(sub) }
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SimBadge(sub, 22, 11)
+                    Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                        Text(label, fontSize = 16.sp)
+                        Text(
+                            "SIM ${simLabel(sub) ?: "?"} · subscription $sub",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    RadioButton(selected = sub == selected, onClick = { onPick(sub) })
+                }
+            }
+        }
+    }
+}
+
+/** Xiaomi-style recipient picker: search the address book, or type a number. */
+@Composable
+private fun RecipientPicker(onPick: (String) -> Unit, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    var people by remember { mutableStateOf(listOf<Contacts.Person>()) }
+    var loading by remember { mutableStateOf(true) }
+    var query by remember { mutableStateOf("") }
+    var manual by remember { mutableStateOf(false) }
+    var number by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        people = withContext(Dispatchers.IO) { Contacts.all(ctx) }
+        loading = false
+        // no contacts permission or empty address book: typing is the only way in
+        if (people.isEmpty()) manual = true
+    }
+
+    val shown = remember(people, query) {
+        if (query.isBlank()) people.take(200)
+        else people.filter {
+            it.name.contains(query, true) || Contacts.digits(it.number).contains(Contacts.digits(query))
+        }.take(200)
+    }
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            // Dialog windows get zero insets, so clear the gesture bar by hand
+            Column(Modifier.fillMaxSize().systemBarsPadding().padding(bottom = 24.dp)) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 4.dp, top = 8.dp, end = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Filled.Close, contentDescription = "close")
+                    }
+                    Text("New message", fontSize = 20.sp, fontWeight = FontWeight.Medium)
+                }
+
+                if (manual) {
+                    OutlinedTextField(
+                        number, { number = it },
+                        label = { Text("phone number") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                    )
+                    TextButton(
+                        enabled = Contacts.digits(number).length >= 4,
+                        onClick = { onPick(number) },
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                    ) { Text("Start conversation") }
+                } else {
+                    SearchPill(query, { query = it }, "Search contacts")
+                    if (loading) {
+                        Text("Loading contacts…", style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(20.dp))
+                    }
+                    LazyColumn(Modifier.weight(1f)) {
+                        items(shown, key = { it.number + it.name }) { p ->
+                            Row(
+                                Modifier.fillMaxWidth().clickable { onPick(p.number) }
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Avatar(p.number, 44.dp, 15)
+                                Column(Modifier.padding(start = 14.dp)) {
+                                    Text(p.name, fontSize = 16.sp, maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis)
+                                    if (p.name != p.number) Text(p.number, fontSize = 13.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                    }
+                    if (!loading && shown.isEmpty()) {
+                        Text("No contact matches.", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(20.dp))
+                    }
+                }
+
+                TextButton(
+                    onClick = { manual = !manual },
+                    modifier = Modifier.padding(start = 8.dp, bottom = 12.dp)
+                ) { Text(if (manual) "Choose from contacts" else "Enter a number instead") }
+            }
+        }
     }
 }
 
 /** MIUI search field: filled surface, small radius, no border */
 @Composable
-private fun SearchPill(query: String, onChange: (String) -> Unit) {
+private fun SearchPill(
+    query: String,
+    onChange: (String) -> Unit,
+    placeholder: String = "Search messages"
+) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(12.dp),
@@ -407,7 +534,7 @@ private fun SearchPill(query: String, onChange: (String) -> Unit) {
                 textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp),
                 modifier = Modifier.weight(1f).padding(start = 10.dp),
                 decorationBox = { inner ->
-                    if (query.isEmpty()) Text("Search messages", fontSize = 15.sp,
+                    if (query.isEmpty()) Text(placeholder, fontSize = 15.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     inner()
                 }
@@ -862,41 +989,19 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
     }
 
     if (chooseSim) {
-        val sims = Sms.sims(ctx)
-        AlertDialog(
-            onDismissRequest = { chooseSim = false },
-            title = { Text("Send with") },
-            text = {
-                Column {
-                    sims.forEach { (sub, label) ->
-                        TextButton(onClick = { sendSim = sub; chooseSim = false }) {
-                            Text(
-                                (if (sub == (sendSim ?: -1)) "✓ " else "") + label +
-                                    " (SIM ${simLabel(sub) ?: "-"})"
-                            )
-                        }
-                    }
-                    if (sims.isEmpty()) Text("No SIM information available",
-                        style = MaterialTheme.typography.bodySmall)
-                }
-            },
-            confirmButton = { TextButton(onClick = { chooseSim = false }) { Text("Cancel") } }
+        SimPickerSheet(
+            selected = sendSim,
+            onPick = { sendSim = it; chooseSim = false },
+            onDismiss = { chooseSim = false }
         )
     }
 
     if (pickSim) {
-        val sims = Sms.sims(ctx)
-        AlertDialog(
-            onDismissRequest = { pickSim = false },
-            title = { Text("Send with") },
-            text = {
-                Column {
-                    sims.forEach { (sub, label) ->
-                        TextButton(onClick = { pickSim = false; doSend(draft, sub) }) { Text(label) }
-                    }
-                }
-            },
-            confirmButton = { TextButton(onClick = { pickSim = false }) { Text("Cancel") } }
+        SimPickerSheet(
+            selected = sendSim,
+            title = "Send message with",
+            onPick = { sub -> pickSim = false; doSend(draft, sub) },
+            onDismiss = { pickSim = false }
         )
     }
 
