@@ -20,7 +20,9 @@ class FilterService : NotificationListenerService() {
     private lateinit var clf: Classifier
     private lateinit var store: Store
     private var filtered = 0
-    private var lastSmsDate = 0L   // provider fallback dedupe: one SMS, many notification updates
+    private var lastSmsDate = 0L
+    private val contacts by lazy { Contacts.suffixes(this) }
+    private val storedContacts = mutableSetOf<String>()   // provider fallback dedupe: one SMS, many notification updates
 
     override fun onListenerConnected() {
         super.onListenerConnected()
@@ -80,7 +82,7 @@ class FilterService : NotificationListenerService() {
             if (text.isBlank() || sender.isBlank()) return
             if (n.category != null && n.category != Notification.CATEGORY_MESSAGE) return
 
-            val v = clf.classify(text, sender)
+            val v = clf.classify(text, sender, contacts)
             store.add(sender, text, v)
 
             val enabled = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("filter_on", true)

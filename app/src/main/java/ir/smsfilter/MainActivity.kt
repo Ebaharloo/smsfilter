@@ -63,6 +63,8 @@ fun Screen(store: Store, clf: Classifier) {
     var filterOn by remember { mutableStateOf(ctx.getSharedPreferences(FilterService.PREFS, 0).getBoolean("filter_on", true)) }
     var probe by remember { mutableStateOf("") }
     var verdict by remember { mutableStateOf<Verdict?>(null) }
+    var scanning by remember { mutableStateOf(false) }
+    var scanInfo by remember { mutableStateOf("") }
     val nm = remember { ctx.getSystemService(android.app.NotificationManager::class.java) }
     val hasAccess = remember { nm.isNotificationListenerAccessGranted(
         android.content.ComponentName(ctx, FilterService::class.java)) }
@@ -70,6 +72,8 @@ fun Screen(store: Store, clf: Classifier) {
     // SMS provider - that needs READ_SMS (runtime permission, asked here on a real device).
     var hasSmsRead by remember { mutableStateOf(
         androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_SMS) ==
+            PackageManager.PERMISSION_GRANTED &&
+        androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) ==
             PackageManager.PERMISSION_GRANTED) }
 
     fun refresh() = scope.launch {
@@ -93,10 +97,11 @@ fun Screen(store: Store, clf: Classifier) {
 
         if (!hasSmsRead) {
             TextButton(onClick = {
-                (ctx as? ComponentActivity)?.requestPermissions(arrayOf(Manifest.permission.READ_SMS), 1)
+                (ctx as? ComponentActivity)?.requestPermissions(
+                    arrayOf(Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS), 1)
                 hasSmsRead = androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_SMS) ==
                     PackageManager.PERMISSION_GRANTED
-            }) { Text("Grant SMS read (needed on Android 15+)") }
+            }) { Text("Grant SMS + contacts access") }
         }
         if (!hasAccess) {
             TextButton(onClick = { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) {
@@ -113,6 +118,32 @@ fun Screen(store: Store, clf: Classifier) {
         verdict?.let {
             Text("${it.label} score=${it.score}  ${it.why.joinToString(", ")}",
                 style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(vertical = 4.dp))
+        }
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(enabled = !scanning, onClick = {
+                scanning = true
+                scanInfo = "scanning inbox…"
+                scope.launch {
+                    val n = withContext(Dispatchers.IO) {
+                        store.clear()   // full rebuild: inbox is the source of truth on re-scan
+                        val contacts = Contacts.suffixes(ctx)
+                        val sms = SmsReader.scan(ctx, 1000)
+                        var spam = 0
+                        for (s in sms) {
+                            val v = clf.classify(s.body, s.address, contacts)
+                            if (v.label == Label.SPAM) spam++
+                            store.add(s.address, s.body, v, s.date)
+                        }
+                        "${sms.size} messages · $spam ads · ${contacts.size} contacts allowed"
+                    }
+                    scanInfo = n
+                    scanning = false
+                    refresh()
+                }
+            }) { Text(if (scanning) "Scanning…" else "Scan inbox") }
+            if (scanInfo.isNotEmpty()) Text(scanInfo, style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.padding(top = 14.dp))
         }
 
         TabRow(tab) {

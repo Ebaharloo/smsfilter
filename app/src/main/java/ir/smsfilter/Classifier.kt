@@ -22,7 +22,8 @@ class Classifier(private val rules: RuleSet, private val model: Model? = null) {
         rules.allowContains.firstOrNull { normalize(it) in sLow }?.let {
             return Verdict(Label.IMPORTANT, 0, listOf("allow~:$it"), norm)
         }
-        if (contacts.any { normalize(it) == sLow }) return Verdict(Label.IMPORTANT, 0, listOf("contact"), norm)
+        // contacts are stored as 9-digit suffixes (see Contacts.kt)
+        Contacts.suffixOf(sender)?.let { if (it in contacts) return Verdict(Label.IMPORTANT, 0, listOf("contact"), norm) }
 
         // 2. content score
         var score = 0
@@ -56,7 +57,7 @@ class Classifier(private val rules: RuleSet, private val model: Model? = null) {
         val hasAmount = rules.amountRegex.containsMatchIn(norm)
         var guardHit: String? = null
         for ((group, terms) in rules.guardAbs) {
-            if (group == "transaction" && !hasAmount) continue
+            if (group == "transaction" && !hasAmount) continue   // confirmations (transaction_confirm) need no amount
             guardHit = hit(group, terms)
             if (guardHit != null) break
         }

@@ -15,23 +15,29 @@ data class Msg(
     val why: String
 )
 
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 1) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 2) {
 
     override fun onCreate(db: SQLiteDatabase) = db.execSQL(
         "CREATE TABLE msg(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, sender TEXT, " +
-            "text TEXT NOT NULL, label TEXT NOT NULL, score INTEGER NOT NULL, why TEXT)"
+            "text TEXT NOT NULL, label TEXT NOT NULL, score INTEGER NOT NULL, why TEXT, " +
+            "UNIQUE(ts, text))"
     )
 
-    override fun onUpgrade(db: SQLiteDatabase, old: Int, new: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, old: Int, new: Int) {
+        // dev-stage schema: inbox scan needs UNIQUE(ts, text) for idempotent re-scans
+        db.execSQL("DROP TABLE IF EXISTS msg")
+        onCreate(db)
+    }
 
-    fun add(sender: String, text: String, v: Verdict): Long = writableDatabase.insert("msg", null, ContentValues().apply {
-        put("ts", System.currentTimeMillis())
+    fun add(sender: String, text: String, v: Verdict, ts: Long = System.currentTimeMillis()): Long =
+        writableDatabase.insertWithOnConflict("msg", null, ContentValues().apply {
+        put("ts", ts)
         put("sender", sender)
         put("text", text)
         put("label", v.label.name)
         put("score", v.score)
         put("why", v.why.joinToString(", "))
-    })
+    }, SQLiteDatabase.CONFLICT_IGNORE)
 
     fun list(label: Label? = null, limit: Int = 300): List<Msg> {
         val where = if (label != null) "WHERE label=?" else ""
@@ -47,6 +53,8 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 1) {
         }
         return out
     }
+
+    fun clear() = writableDatabase.delete("msg", null, null)
 
     fun relabel(id: Long, label: Label) = writableDatabase
         .execSQL("UPDATE msg SET label=? WHERE id=?", arrayOf(label.name, id))

@@ -5,6 +5,8 @@
     <!-- Android 15 redacts message text in notifications for untrusted listeners, so the
          authoritative text comes from the SMS provider; the notification is only what we cancel. -->
     <uses-permission android:name="android.permission.READ_SMS" />
+    <!-- messages from anyone in the address book are never filtered -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
 
     <application
         android:allowBackup="true"

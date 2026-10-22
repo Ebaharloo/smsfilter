@@ -93,8 +93,13 @@ def classify(text: str, sender: str = "", contacts: set[str] | None = None) -> d
     for a in RULES["senders"]["allow_contains"]:
         if normalize(a) in s_low:
             return {"label": "IMPORTANT", "score": 0, "why": [f"allow~:{a}"]}
-    if s_low in {normalize(c) for c in contacts}:
-        return {"label": "IMPORTANT", "score": 0, "why": ["contact"]}
+    def _suffix(num: str):
+        d = "".join(ch for ch in normalize(num) if ch.isdigit())
+        return d[-9:] if len(d) >= 9 else None
+
+    s_suf = _suffix(sender)
+    if s_suf and s_suf in {_suffix(c) for c in contacts}:
+        return {"label": "IMPORTANT", "score": 0, "why": ["contact"], "norm": norm}
 
     # stage 2: content score (each normalized term counted once, per group capped)
     score = 0
