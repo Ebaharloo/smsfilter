@@ -46,15 +46,16 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val store = Store(this)
-        val clf = Classifier(RuleSet.load(this), Model.fromAssets(this))
-        setContent { MaterialTheme { Screen(store, clf) } }
+        val learned = Learned(this)
+        val clf = Classifier(RuleSet.load(this), Model.fromAssets(this), learned)
+        setContent { MaterialTheme { Screen(store, clf, learned) } }
     }
 }
 
 private val fmt = SimpleDateFormat("dd/MM HH:mm", Locale.US)
 
 @Composable
-fun Screen(store: Store, clf: Classifier) {
+fun Screen(store: Store, clf: Classifier, learned: Learned) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     var tab by remember { mutableStateOf(1) }
@@ -126,14 +127,15 @@ fun Screen(store: Store, clf: Classifier) {
                 scanInfo = "scanning inbox…"
                 scope.launch {
                     val n = withContext(Dispatchers.IO) {
-                        store.clear()   // full rebuild: inbox is the source of truth on re-scan
                         val contacts = Contacts.suffixes(ctx)
                         val sms = SmsReader.scan(ctx, 1000)
                         var spam = 0
                         for (s in sms) {
                             val v = clf.classify(s.body, s.address, contacts)
                             if (v.label == Label.SPAM) spam++
+                            // insert new rows; re-classify old ones unless the user edited them
                             store.add(s.address, s.body, v, s.date)
+                            store.updateVerdict(s.date, s.body, v)
                         }
                         "${sms.size} messages · $spam ads · ${contacts.size} contacts allowed"
                     }
@@ -164,10 +166,20 @@ fun Screen(store: Store, clf: Classifier) {
                     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
                         Row {
                             TextButton(onClick = {
-                                scope.launch { withContext(Dispatchers.IO) { store.relabel(m.id, Label.IMPORTANT) }; refresh() }
+                                scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    store.relabel(m.id, Label.IMPORTANT)
+                                    learned.markImportant(m.sender)
+                                }; refresh()
+                            }
                             }) { Text("این مهم است") }
                             TextButton(onClick = {
-                                scope.launch { withContext(Dispatchers.IO) { store.relabel(m.id, Label.SPAM) }; refresh() }
+                                scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    store.relabel(m.id, Label.SPAM)
+                                    learned.markAd(m.sender, m.text)
+                                }; refresh()
+                            }
                             }) { Text("تبلیغ") }
                         }
                     }

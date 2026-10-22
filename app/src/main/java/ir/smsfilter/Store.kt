@@ -15,12 +15,12 @@ data class Msg(
     val why: String
 )
 
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 2) {
+class Store(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 3) {
 
     override fun onCreate(db: SQLiteDatabase) = db.execSQL(
         "CREATE TABLE msg(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, sender TEXT, " +
             "text TEXT NOT NULL, label TEXT NOT NULL, score INTEGER NOT NULL, why TEXT, " +
-            "UNIQUE(ts, text))"
+            "manual INTEGER NOT NULL DEFAULT 0, UNIQUE(ts, text))"
     )
 
     override fun onUpgrade(db: SQLiteDatabase, old: Int, new: Int) {
@@ -54,10 +54,14 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 2) {
         return out
     }
 
-    fun clear() = writableDatabase.delete("msg", null, null)
+    /** re-classify everything the user has not personally labelled; their edits always win */
+    fun updateVerdict(ts: Long, text: String, v: Verdict) = writableDatabase.execSQL(
+        "UPDATE msg SET label=?, score=?, why=? WHERE ts=? AND text=? AND manual=0",
+        arrayOf(v.label.name, v.score, v.why.joinToString(", "), ts, text)
+    )
 
     fun relabel(id: Long, label: Label) = writableDatabase
-        .execSQL("UPDATE msg SET label=? WHERE id=?", arrayOf(label.name, id))
+        .execSQL("UPDATE msg SET label=?, manual=1 WHERE id=?", arrayOf(label.name, id))
 
     fun counts(): Map<Label, Int> = Label.entries.associateWith { l ->
         readableDatabase.rawQuery("SELECT COUNT(*) FROM msg WHERE label=?", arrayOf(l.name)).use {

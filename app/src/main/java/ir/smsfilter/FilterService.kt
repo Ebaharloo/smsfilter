@@ -37,7 +37,7 @@ class FilterService : NotificationListenerService() {
     override fun onCreate() {
         super.onCreate()
         android.util.Log.i("SMSFilter", "service onCreate")
-        clf = Classifier(RuleSet.load(this), Model.fromAssets(this))
+        clf = Classifier(RuleSet.load(this), Model.fromAssets(this), Learned(this))
         store = Store(this)
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(

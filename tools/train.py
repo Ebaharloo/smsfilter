@@ -63,6 +63,12 @@ def load(corpus: str):
     if corpus in ("gheychi", "both"):
         for r in json.loads((DATA / "gheychi.json").read_text(encoding="utf-8")):
             rows.append((r["Text"], 1 if r["Label"] == 1 else 0, "gheychi"))
+    mine = HERE.parent / "data" / "labeled.jsonl"
+    if corpus in ("mine", "both") and mine.exists():
+        for line in mine.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                r = json.loads(line)
+                rows.append((r["text"], 1 if r["label"] == "SPAM" else 0, "mine"))
     if corpus in ("pssc", "both"):
         c = sqlite3.connect(DATA / "pssc.sqlite3")
         for text, label in c.execute("SELECT text, label FROM SMS"):
@@ -137,6 +143,19 @@ def main():
               f"  (wrongly filtered {m['fn']})")
         agg.update({k: m[k] for k in ("tp", "fp", "tn", "fn")})
     tot = agg["tp"] + agg["fp"] + agg["tn"] + agg["fn"]
+    # his own inbox, out-of-fold
+    mine_pairs = []
+    for i in range(5):
+        test_mine = [r for r in folds[i] if r[2] == "mine"]
+        if not test_mine:
+            continue
+        tr = [r for j, f in enumerate(folds) if j != i for r in f]
+        w2, b2 = train(tr)
+        mine_pairs += scores(w2, b2, test_mine)
+    if mine_pairs:
+        m = metrics(mine_pairs)
+        print(f"\n  his inbox (out-of-fold): acc={m['acc']:.3f} spamR={m['spam_r']:.3f} "
+              f"important_kept={m['important_kept']:.3f} (wrongly filtered {m['fn']})")
     print(f"  pooled acc={(agg['tp'] + agg['tn']) / tot:.3f} spamR={agg['tp'] / max(agg['tp'] + agg['fp'], 1):.3f} "
           f"important_kept={agg['tn'] / max(agg['tn'] + agg['fn'], 1):.3f}")
 

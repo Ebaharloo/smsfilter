@@ -8,7 +8,11 @@ enum class Label { IMPORTANT, SPAM, UNSURE }
 data class Verdict(val label: Label, val score: Int, val why: List<String>, val norm: String)
 
 /** Stage order is a safety property, not a preference. Mirrored by tools/mirror.py. */
-class Classifier(private val rules: RuleSet, private val model: Model? = null) {
+class Classifier(
+    private val rules: RuleSet,
+    private val model: Model? = null,
+    private val learned: Learned? = null
+) {
 
     fun classify(text: String, sender: String = "", contacts: Set<String> = emptySet()): Verdict {
         val norm = normalize(text)
@@ -62,7 +66,17 @@ class Classifier(private val rules: RuleSet, private val model: Model? = null) {
             if (guardHit != null) break
         }
         val p = model?.prob(text) ?: 1.0
+        val sq2 = squash(norm)
         val hard = guardHit != null && guardHit.substringAfter("guard:").substringBefore(":") in rules.guardHard
+        val learnedHits = learned?.adWordHits(sq2) ?: 0
+        val senderBlocked = learned?.blocked()?.contains(sender) == true
+
+        // learned ad phrases beat the soft guard (that is how a "بانک"-mentioning ad gets caught),
+        // but never the hard guard: OTP / transaction / government stay protected regardless
+        if (!hard) {
+            if (senderBlocked) return Verdict(Label.SPAM, 90, listOf("learned:sender") + why, norm)
+            if (learnedHits >= 2) return Verdict(Label.SPAM, 80, listOf("learned:words=$learnedHits") + why, norm)
+        }
         if (guardHit != null && (hard || p < rules.softGuardConf)) {
             return Verdict(Label.IMPORTANT, score, listOf(guardHit) + why, norm)
         }
