@@ -62,7 +62,7 @@ object Sms {
         val simId: Int = -1          // subscription_id; -1 = unknown/single-SIM
     )
 
-    fun threads(ctx: Context, limit: Int = 300): List<Thread> {
+    fun threads(ctx: Context, limit: Int = 300, maxRows: Int = 5000): List<Thread> {
         val simCol = detectSimColumn(ctx)
         val proj = (
             listOf(
@@ -76,7 +76,9 @@ object Sms {
             ctx.contentResolver.query(
                 Telephony.Sms.CONTENT_URI, proj, null, null, "${Telephony.Sms.DATE} DESC"
             )?.use { c ->
-                while (c.moveToNext()) {
+                var scanned = 0
+                while (c.moveToNext() && scanned < maxRows) {
+                    scanned++
                     val tid = c.getLong(0)
                     val addr = c.getString(1).orEmpty()
                     val body = c.getString(2).orEmpty()
@@ -104,7 +106,7 @@ object Sms {
             .sortedByDescending { it.date }
     }
 
-    fun messages(ctx: Context, threadId: Long): List<Message> {
+    fun messages(ctx: Context, threadId: Long, window: Int = 800): List<Message> {
         val out = ArrayList<Message>()
         val simCol = detectSimColumn(ctx)
         val proj = (
@@ -130,17 +132,36 @@ object Sms {
                     )
                 }
             }
-            android.util.Log.i("SMSSim", "thread $threadId rows=${out.size} sims=${out.map { it.simId }.distinct()}")
         } catch (t: Throwable) {
         }
-        return out
+        // a bank thread can hold thousands of messages; the newest window is all the UI shows
+        return if (out.size > window) out.subList(out.size - window, out.size).toList() else out
     }
 
+    /** thread id for a number, asked of the provider directly - no inbox-wide grouping */
     fun threadIdFor(ctx: Context, address: String): Long? {
+        try {
+            ctx.contentResolver.query(
+                Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms.THREAD_ID), "${Telephony.Sms.ADDRESS}=?",
+                arrayOf(address), null
+            )?.use { c -> if (c.moveToFirst()) return c.getLong(0) }
+        } catch (t: Throwable) {
+        }
         val digits = Contacts.digits(address).takeLast(9)
-        return threads(ctx).firstOrNull {
-            it.address == address || (digits.isNotEmpty() && Contacts.digits(it.address).takeLast(9) == digits)
-        }?.id
+        if (digits.isEmpty()) return null
+        try {
+            ctx.contentResolver.query(
+                Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS),
+                null, null, null
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val candidate = c.getString(1).orEmpty()
+                    if (Contacts.digits(candidate).takeLast(9) == digits) return c.getLong(0)
+                }
+            }
+        } catch (t: Throwable) {
+        }
+        return null
     }
 
     fun markThreadRead(ctx: Context, threadId: Long) {
@@ -160,8 +181,19 @@ object Sms {
         false
     }
 
-    /** active SIMs as (subscriptionId, label) */
-    fun sims(ctx: Context): List<Pair<Int, String>> = try {
+    @Volatile
+    private var simsCache: Pair<Long, List<Pair<Int, String>>>? = null
+
+    /** active SIMs as (subscriptionId, label); cached - every row badge and both pickers ask for it */
+    fun sims(ctx: Context): List<Pair<Int, String>> {
+        val now = android.os.SystemClock.elapsedRealtime()
+        simsCache?.let { if (now - it.first < 60_000) return it.second }
+        val fresh = computeSims(ctx)
+        simsCache = now to fresh
+        return fresh
+    }
+
+    private fun computeSims(ctx: Context): List<Pair<Int, String>> = try {
         val sm = ctx.getSystemService(android.telephony.SubscriptionManager::class.java)
         val list = sm.activeSubscriptionInfoList
         android.util.Log.i("SMSSim", "active subs=${list?.size ?: -1}")
@@ -169,37 +201,50 @@ object Sms {
             info.subscriptionId to (info.displayName?.toString() ?: "SIM ${info.simSlotIndex + 1}")
         }
         // MIUI hands out an empty info list even to the default SMS app. Fall back to the sub ids
-        // actually present in the provider (plus the default one) and label them by slot.
+        // actually carrying messages, newest first, capped at the phone's SIM count: stale sub ids
+        // and the ROM's 0/"empty" placeholder would otherwise show phantom SIMs.
         fromManager.ifEmpty {
-            val ids = LinkedHashSet<Int>()
-            try {
-                ids += SubscriptionManager.getDefaultSmsSubscriptionId()
-            } catch (t: Throwable) {
-            }
+            val lastSeen = HashMap<Int, Long>()
             val col = detectSimColumn(ctx)
             if (col.isNotEmpty()) {
                 try {
                     ctx.contentResolver.query(
-                        Telephony.Sms.CONTENT_URI, arrayOf(col), null, null, null
+                        Telephony.Sms.CONTENT_URI, arrayOf(col, Telephony.Sms.DATE), null, null, null
                     )?.use { c ->
                         var rows = 0
                         while (c.moveToNext() && rows < 2000) {
                             rows++
                             val v = c.getInt(0)
-                            if (v >= 0) ids += v
+                            val ts = c.getLong(1)
+                            if (v >= 0) lastSeen[v] = maxOf(lastSeen[v] ?: 0L, ts)
                         }
                     }
                 } catch (t: Throwable) {
                 }
             }
-            ids.filter { it >= 0 }.map { sub ->
-                val slot = try {
-                    SubscriptionManager.getSlotIndex(sub)
-                } catch (t: Throwable) {
-                    -1
-                }
-                sub to (if (slot >= 0) "SIM ${slot + 1}" else "SIM $sub")
+            val phoneCount = try {
+                ctx.getSystemService(android.telephony.TelephonyManager::class.java)?.phoneCount ?: 0
+            } catch (t: Throwable) {
+                0
             }
+            if (lastSeen.isEmpty()) {
+                try {
+                    lastSeen[SubscriptionManager.getDefaultSmsSubscriptionId()] = 0L
+                } catch (t: Throwable) {
+                }
+            }
+            lastSeen.entries
+                .filter { it.key >= 0 }
+                .sortedByDescending { it.value }
+                .let { if (phoneCount > 0) it.take(phoneCount) else it }
+                .mapIndexed { index, e ->
+                    val slot = try {
+                        SubscriptionManager.getSlotIndex(e.key)
+                    } catch (t: Throwable) {
+                        -1
+                    }
+                    e.key to "SIM ${if (slot >= 0) slot + 1 else index + 1}"
+                }
         }
     } catch (t: Throwable) {
         emptyList()

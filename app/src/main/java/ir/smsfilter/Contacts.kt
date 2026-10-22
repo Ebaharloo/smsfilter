@@ -64,6 +64,33 @@ object Contacts {
         return out
     }
 
+    /**
+     * Names for a whole inbox in one provider query, keyed by the same last-9-digit suffix the
+     * filter uses. Asking per row meant ~150 content queries on every list load.
+     */
+    fun namesFor(ctx: Context): Map<String, String> {
+        val out = HashMap<String, String>(512)
+        try {
+            ctx.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                arrayOf(
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    ContactsContract.CommonDataKinds.Phone.NUMBER
+                ),
+                null, null, null
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val name = c.getString(0)?.trim().orEmpty()
+                    val suffix = digits(c.getString(1).orEmpty()).takeLast(9)
+                    if (name.isNotEmpty() && suffix.length == 9) out.putIfAbsent(suffix, name)
+                }
+            }
+        } catch (t: Throwable) {
+            return emptyMap()
+        }
+        return out
+    }
+
     /** digits only, Persian/Arabic digits folded to ASCII first */
     fun digits(raw: String): String {
         val n = Normalizer.normalize(raw)

@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -65,6 +66,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
@@ -84,10 +89,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -146,6 +155,20 @@ private fun rtlIsolated(text: String): String = "\u2068" + text + "\u2069"
 
 private fun isPersian(text: String) = text.any { it in '\u0600'..'\u06FF' }
 
+/**
+ * Wrap every numeral run in LRI/PDI so it keeps its internal order inside a Persian sentence.
+ * Without this, card numbers and amounts next to colons get re-ordered by the bidi algorithm.
+ */
+private val LTR_RUN = Regex(
+    "(https?://|www\\.)\\S+" +                                  // links
+        "|\\b(?:t\\.me|bit\\.ly|b2n\\.ir|yun\\.ir|zarinp\\.al)\\S*" +  // shortlinks
+        "|[a-zA-Z0-9-]+\\.(?:ir|com|net|org)\\S*" +                  // bare domains
+        "|[A-Za-z0-9@._:/-]*[0-9][A-Za-z0-9@._:/-]*" +            // OFF50, 1,234,567, 1111-111-1111
+        "|[0-9]"                                                   // a lone digit
+)
+private fun isolateDigits(text: String): String =
+    if (isPersian(text)) LTR_RUN.replace(text) { "\u2066${it.value}\u2069" } else text
+
 /** true when the phone actually has more than one SIM; badge only makes sense then */
 @Composable
 private fun multiSim(): Boolean {
@@ -162,13 +185,22 @@ private fun multiSim(): Boolean {
 }
 
 @Composable
-private fun SimBadge(simId: Int, size: Int = 14, fontSize: Int = 9) {
+private fun SimBadge(simId: Int, size: Int = 16, fontSize: Int = 9) {
     val label = simLabel(simId) ?: return
     Box(
-        Modifier.size(size.dp).clip(RoundedCornerShape(4.dp)).background(SIM_BADGE),
+        Modifier.size(size.dp).clip(CircleShape).background(SIM_BADGE),
         contentAlignment = Alignment.Center
     ) {
-        Text(label, color = Color.White, fontSize = fontSize.sp, fontWeight = FontWeight.Bold)
+        // font padding sits below the baseline and pushes the digit off-centre in a small circle
+        Text(
+            label,
+            color = Color.White,
+            fontSize = fontSize.sp,
+            lineHeight = fontSize.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            style = TextStyle(platformStyle = PlatformTextStyle(includeFontPadding = false))
+        )
     }
 }
 
@@ -219,6 +251,7 @@ fun ConversationsPage(
     var selection by remember { mutableStateOf(setOf<Long>()) }
     var newMessage by remember { mutableStateOf(false) }
     var simByThread by remember { mutableStateOf(mapOf<Long, Int>()) }
+    val snack = remember { SnackbarHostState() }
 
     LaunchedEffect(reload) {
         val loaded = withContext(Dispatchers.IO) { Sms.threads(ctx) }
@@ -230,7 +263,8 @@ fun ConversationsPage(
         }
         simByThread = loaded.associate { it.id to it.simId }
         names = withContext(Dispatchers.IO) {
-            loaded.take(150).associate { it.address to Contacts.nameFor(ctx, it.address) }
+            val bySuffix = Contacts.namesFor(ctx)
+            loaded.associate { it.address to bySuffix[Contacts.suffixOf(it.address)] }
         }
     }
 
@@ -243,9 +277,20 @@ fun ConversationsPage(
     val shown = ordered.filter { InboxPolicy.inTab(it, tab) }
 
     fun archiveThreads(ids: Set<Long>) = scope.launch {
-        withContext(Dispatchers.IO) { ids.forEach { ThreadFlags.setArchived(ctx, it, !archivedMode) } }
+        val target = !archivedMode
+        withContext(Dispatchers.IO) { ids.forEach { ThreadFlags.setArchived(ctx, it, target) } }
         selection = emptySet()
         reload++
+        // Google Messages gives an undo for archive; without one a mis-swipe is permanent
+        val result = snack.showSnackbar(
+            message = if (target) "Conversation archived" else "Moved back to inbox",
+            actionLabel = "UNDO",
+            duration = SnackbarDuration.Short
+        )
+        if (result == SnackbarResult.ActionPerformed) {
+            withContext(Dispatchers.IO) { ids.forEach { ThreadFlags.setArchived(ctx, it, !target) } }
+            reload++
+        }
     }
 
     fun deleteThreads(ids: Set<Long>) = scope.launch {
@@ -360,6 +405,11 @@ fun ConversationsPage(
             }
         }
 
+        SnackbarHost(
+            snack,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 88.dp)
+        )
+
         if (!archivedMode && selection.isEmpty()) {
             FloatingActionButton(
                 onClick = { newMessage = true },
@@ -411,7 +461,7 @@ private fun SimPickerSheet(
                     Column(Modifier.weight(1f).padding(start = 14.dp)) {
                         Text(label, fontSize = 16.sp)
                         Text(
-                            "SIM ${simLabel(sub) ?: "?"} · subscription $sub",
+                            "subscription id $sub",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -562,11 +612,16 @@ private fun SwipeRow(
     onArchive: () -> Unit,
     onToggleRead: () -> Unit
 ) {
+    // SwipeToDismissBox directions are layout-direction aware: in a Persian (RTL) layout the
+    // physical left swipe arrives as StartToEnd, which used to run "mark read" instead of archive.
+    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+    val archiveDir = if (rtl) SwipeToDismissBoxValue.StartToEnd else SwipeToDismissBoxValue.EndToStart
+    val readDir = if (rtl) SwipeToDismissBoxValue.EndToStart else SwipeToDismissBoxValue.StartToEnd
     val dismissState = rememberSwipeToDismissBoxState(
         confirmValueChange = { value ->
             when (value) {
-                SwipeToDismissBoxValue.EndToStart -> onArchive()
-                SwipeToDismissBoxValue.StartToEnd -> onToggleRead()
+                archiveDir -> onArchive()
+                readDir -> onToggleRead()
                 else -> Unit
             }
             false   // the list reloads from the provider; never leave a hole in the UI
@@ -577,12 +632,13 @@ private fun SwipeRow(
         enableDismissFromStartToEnd = !selectionMode,
         enableDismissFromEndToStart = !selectionMode,
         backgroundContent = {
-            val label = if (dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart) "Archive" else "Read"
+            val archive = dismissState.dismissDirection == archiveDir
             Box(
                 Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant)
                     .padding(horizontal = 20.dp),
-                contentAlignment = Alignment.CenterEnd
-            ) { Text(label, style = MaterialTheme.typography.labelLarge) }
+                contentAlignment = if (dismissState.dismissDirection == archiveDir) Alignment.CenterEnd
+                else Alignment.CenterStart
+            ) { Text(if (archive) "Archive" else "Read", style = MaterialTheme.typography.labelLarge) }
         }
     ) {
         ConversationRow(row, name, pinned, muted, selected, selectionMode, simId, onClick, onLongClick)
@@ -604,18 +660,18 @@ private fun ConversationRow(
     onLongClick: () -> Unit
 ) {
     Row(
-        Modifier.fillMaxWidth()
+        Modifier.fillMaxWidth().heightIn(min = 92.dp)
             .background(
                 if (selected) MaterialTheme.colorScheme.secondaryContainer
                 else MaterialTheme.colorScheme.background
             )
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(start = 16.dp, end = 20.dp, top = 14.dp, bottom = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (selectionMode) Checkbox(checked = selected, onCheckedChange = { onClick() })
-        Avatar(row.address, 56.dp, 17, neutral = true)
-        Column(Modifier.weight(1f).padding(start = 16.dp)) {
+        Avatar(row.address, 40.dp, 14, neutral = true)
+        Column(Modifier.weight(1f).padding(start = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (pinned) Icon(
                     Icons.Filled.Star, contentDescription = "pinned",
@@ -623,7 +679,7 @@ private fun ConversationRow(
                 )
                 Text(
                     name ?: Contacts.displayName(row.address),
-                    fontSize = 16.sp,
+                    fontSize = 17.sp,
                     fontWeight = if (row.unread > 0) FontWeight.SemiBold else FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -633,13 +689,17 @@ private fun ConversationRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 6.dp))
             }
-            val snippet = row.snippet.replace('\n', ' ')
+            val snippet = row.snippet.replace('\n', ' ').trim()
+            val farsi = isPersian(snippet)
             Text(
-                if (isPersian(snippet)) rtlIsolated(snippet) else snippet,
-                fontSize = 15.sp,
+                if (farsi) isolateDigits(snippet) else snippet,
+                fontSize = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = if (isPersian(snippet)) TextAlign.Right else TextAlign.Start,
-                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                // base direction must be RTL for Persian, otherwise every Latin digit run
+                // (amounts, dates, card numbers) is laid out left-to-right in the wrong place
+                style = TextStyle(textDirection = if (farsi) TextDirection.Rtl else TextDirection.Ltr),
+                textAlign = if (farsi) TextAlign.Right else TextAlign.Start,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 3.dp)
             )
             // which SIM the newest message of this thread arrived on
@@ -654,12 +714,12 @@ private fun ConversationRow(
         }
         // time above the badge, both flush right: the preview never runs under them
         Column(
-            Modifier.padding(start = 10.dp),
+            Modifier.align(Alignment.Top).padding(start = 10.dp, top = 2.dp),
             horizontalAlignment = Alignment.End
         ) {
             Text(
                 timeLabel(row.date),
-                fontSize = 12.sp,
+                fontSize = 13.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             if (row.unread > 0) {
@@ -724,7 +784,8 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
     }
     LaunchedEffect(threadId) { reload() }
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+        // jump straight to the newest bubble: animating from index 0 looked like the app scrolling by itself
+        if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
     }
     LaunchedEffect(draft) {
         delay(400)
@@ -938,19 +999,19 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
         ) {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(24.dp),
+                shape = RoundedCornerShape(16.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     BasicTextField(
                         value = draft,
                         onValueChange = { draft = it },
-                        textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp),
+                        textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp),
                         maxLines = 5,
                         modifier = Modifier.weight(1f),
                         decorationBox = { inner ->
-                            if (draft.isEmpty()) Text("Text message", fontSize = 16.sp,
+                            if (draft.isEmpty()) Text("Text message", fontSize = 15.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                             inner()
                         }
@@ -1110,16 +1171,20 @@ private fun Bubble(
             horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
             Surface(
                 color = bg,
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier.widthIn(max = 330.dp)
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.widthIn(max = 300.dp)
                     .combinedClickable(onClick = { url?.let(onUrl) }, onLongClick = onLongPress)
             ) {
-                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Column(Modifier.padding(horizontal = 19.dp, vertical = 14.dp)) {
+                    val farsi = isPersian(m.body)
                     Text(
-                        if (isPersian(m.body)) rtlIsolated(m.body) else m.body,
+                        if (farsi) isolateDigits(m.body) else m.body,
                         color = fg,
-                        fontSize = 16.sp,
-                        textAlign = if (m.body.any { it in '\u0600'..'\u06FF' }) TextAlign.Right else TextAlign.Start,
+                        fontSize = 17.sp,
+                        lineHeight = 19.sp,
+                        // same reason as the inbox preview: RTL paragraph, so amounts stay in place
+                        style = TextStyle(textDirection = if (farsi) TextDirection.Rtl else TextDirection.Ltr),
+                        textAlign = if (farsi) TextAlign.Right else TextAlign.Start,
                         modifier = Modifier.fillMaxWidth()
                     )
                     if (url != null || phone != null || IncomingSms.otpOf(m.body) != null) {

@@ -56,16 +56,19 @@ object ThreadFlags {
         emptySet()
     }
 
-    fun setArchived(ctx: Context, threadId: Long, archived: Boolean): Boolean = try {
-        val cv = ContentValues().apply { put(Telephony.Threads.ARCHIVED, if (archived) 1 else 0) }
-        ctx.contentResolver.update(
-            Uri.withAppendedPath(CONVERSATIONS, threadId.toString()), cv, null, null
-        ) >= 0
-    } catch (t: Throwable) {
-        // fall back to a local marker so the row still disappears for the user
+    fun setArchived(ctx: Context, threadId: Long, archived: Boolean): Boolean {
+        // Always keep the local marker as well: MIUI often reports the update as applied and still
+        // shows the thread again, which looked like "archive bounces straight back to the inbox".
         val now = ids(ctx, "archived_local")
         store(ctx, "archived_local", if (archived) now + threadId else now - threadId)
-        false
+        return try {
+            val cv = ContentValues().apply { put(Telephony.Threads.ARCHIVED, if (archived) 1 else 0) }
+            ctx.contentResolver.update(
+                Uri.withAppendedPath(CONVERSATIONS, threadId.toString()), cv, null, null
+            ) > 0
+        } catch (t: Throwable) {
+            false
+        }
     }
 
     fun locallyArchived(ctx: Context): Set<Long> = ids(ctx, "archived_local")
