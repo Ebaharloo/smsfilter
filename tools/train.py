@@ -63,6 +63,14 @@ def load(corpus: str):
     if corpus in ("gheychi", "both"):
         for r in json.loads((DATA / "gheychi.json").read_text(encoding="utf-8")):
             rows.append((r["Text"], 1 if r["Label"] == 1 else 0, "gheychi"))
+    user = HERE.parent / "data" / "user_labels.jsonl"
+    if user.exists() and corpus in ("mine", "both"):
+        for line in user.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                r = json.loads(line)
+                # his own taps outrank template-derived labels: weight them 3x
+                for _ in range(3):
+                    rows.append((r["text"], 1 if r["label"] == "SPAM" else 0, "mine"))
     mine = HERE.parent / "data" / "labeled.jsonl"
     if corpus in ("mine", "both") and mine.exists():
         for line in mine.read_text(encoding="utf-8").splitlines():

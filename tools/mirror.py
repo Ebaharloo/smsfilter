@@ -136,7 +136,9 @@ def classify(text: str, sender: str = "", contacts: set[str] | None = None) -> d
     # not confident (p < soft_guard_conf) - measured: unconditional soft guard leaked 27pp of ads.
     has_amount = re.search(RULES["thresholds"]["amount_regex"], norm) is not None
     hit = None
-    for group, terms in RULES["guard"].items():
+    hard_groups = RULES.get("guard_hard", [])
+    ordered = sorted(RULES["guard"].items(), key=lambda kv: kv[0] in hard_groups, reverse=True)
+    for group, terms in ordered:
         if group.startswith("_"):
             continue
         if group == "transaction" and not has_amount:
@@ -148,7 +150,7 @@ def classify(text: str, sender: str = "", contacts: set[str] | None = None) -> d
                 break
         if hit:
             break
-    hard = RULES.get("guard_hard", [])
+    hard = hard_groups
     soft_conf = RULES["model"]["soft_guard_conf"]
     p_early = MODEL.prob(text) if MODEL is not None else 1.0
     if hit and (hit.split(":")[1] in hard or p_early < soft_conf):

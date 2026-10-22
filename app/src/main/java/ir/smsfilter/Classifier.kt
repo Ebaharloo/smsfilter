@@ -60,7 +60,9 @@ class Classifier(
 
         val hasAmount = rules.amountRegex.containsMatchIn(norm)
         var guardHit: String? = null
-        for ((group, terms) in rules.guardAbs) {
+        // hard groups first: a soft hit must never shadow a hard one (a fund notice saying
+        // "واریز شد" was matching an earlier soft group and then getting filtered)
+        for ((group, terms) in rules.guardAbs.sortedByDescending { it.first in rules.guardHard }) {
             if (group == "transaction" && !hasAmount) continue   // confirmations (transaction_confirm) need no amount
             guardHit = hit(group, terms)
             if (guardHit != null) break
