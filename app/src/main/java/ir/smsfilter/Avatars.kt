@@ -9,7 +9,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -30,10 +29,16 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** contact photos, cached so scrolling does not re-decode. LruCache rejects null values,
- *  so "no photo" is remembered separately instead of being cached. */
+/**
+ * Contact photos, cached so scrolling does not re-decode.
+ * LruCache rejects null values, so "this contact has no photo" is remembered separately.
+ */
 private val photoCache = LruCache<String, Bitmap>(80)
 private val noPhoto = java.util.Collections.synchronizedSet(HashSet<String>())
+
+/** MIUI uses a neutral grey circle for unknown senders; known contacts get their photo. */
+private val NEUTRAL_AVATAR = Color(0xFF3C3C3C)
+private val NEUTRAL_INITIALS = Color(0xFFB0B0B0)
 
 private val AVATAR_COLORS = listOf(
     Color(0xFF5C6BC0), Color(0xFF26A69A), Color(0xFFEF6C00), Color(0xFF8E24AA),
@@ -63,7 +68,13 @@ private fun loadPhoto(ctx: Context, address: String): Bitmap? = try {
 }
 
 @Composable
-fun Avatar(address: String, size: Dp, fallbackFontSize: Int = 14) {
+fun Avatar(
+    address: String,
+    size: Dp,
+    fallbackFontSize: Int = 14,
+    neutral: Boolean = false,
+    tint: Color? = null
+) {
     val ctx = LocalContext.current
     var photo by remember(address) { mutableStateOf(photoCache.get(address)) }
     LaunchedEffect(address) {
@@ -83,13 +94,14 @@ fun Avatar(address: String, size: Dp, fallbackFontSize: Int = 14) {
         )
     } else {
         Box(
-            Modifier.size(size).clip(CircleShape).background(avatarColor(address)),
+            Modifier.size(size).clip(CircleShape)
+                .background(tint ?: if (neutral) NEUTRAL_AVATAR else avatarColor(address)),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 initialsOf(address),
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
+                color = if (neutral) NEUTRAL_INITIALS else Color.White,
+                fontWeight = FontWeight.Medium,
                 fontSize = fallbackFontSize.sp
             )
         }

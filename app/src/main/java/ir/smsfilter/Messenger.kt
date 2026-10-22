@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -26,22 +28,36 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.MailOutline
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
@@ -59,7 +75,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -79,6 +97,13 @@ import java.util.Locale
 private val clock = SimpleDateFormat("HH:mm", Locale.US)
 private val dayFmt = SimpleDateFormat("dd MMM", Locale.US)
 private val fullFmt = SimpleDateFormat("yyyy/MM/dd", Locale.US)
+private val stampFmt = SimpleDateFormat("d MMM HH:mm", Locale.US)
+
+/** MIUI badge / dot colours, independent of the accent */
+private val BADGE_GREY = Color(0xFF4A4A4A)
+private val FAB_AMBER = Color(0xFFFFB300)
+private val SIM_BADGE = Color(0xFF2E7DFF)
+
 
 private fun timeLabel(ts: Long): String {
     val now = Calendar.getInstance()
@@ -106,6 +131,66 @@ private fun dayLabel(ts: Long): String {
 
 private fun Sms.Thread.toRow() = ThreadRow(id, address, snippet, date, unread, outgoing)
 
+/** Persian text needs its own direction and isolate marks, or digits jump around the line */
+private fun rtlIsolated(text: String): String = "\u2068" + text + "\u2069"
+
+private fun isPersian(text: String) = text.any { it in '\u0600'..'\u06FF' }
+
+/** true when the phone actually has more than one SIM; badge only makes sense then */
+@Composable
+private fun multiSim(): Boolean {
+    val ctx = LocalContext.current
+    return remember {
+        val subs = Sms.sims(ctx).size
+        val phoneCount = try {
+            ctx.getSystemService(android.telephony.TelephonyManager::class.java)?.phoneCount ?: 0
+        } catch (e: Throwable) {
+            0
+        }
+        subs > 1 || phoneCount > 1
+    }
+}
+
+@Composable
+private fun SimBadge(simId: Int, size: Int = 14, fontSize: Int = 9) {
+    val label = simLabel(simId) ?: return
+    Box(
+        Modifier.size(size.dp).clip(RoundedCornerShape(4.dp)).background(SIM_BADGE),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = Color.White, fontSize = fontSize.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+/**
+ * Which SIM a message belongs to, as "1"/"2".
+ * SubscriptionManager is locked down on MIUI (activeSubscriptionInfoList returns 0 even for the
+ * default SMS app), so the label falls back to the slot index and then to the raw sub id.
+ */
+@Composable
+private fun simLabel(simId: Int): String? {
+    if (simId < 0) return null
+    val ctx = LocalContext.current
+    val info = remember(simId) {
+        val subs = Sms.sims(ctx)
+        val phoneCount = try {
+            ctx.getSystemService(android.telephony.TelephonyManager::class.java)?.phoneCount ?: 0
+        } catch (e: Throwable) {
+            0
+        }
+        val bySub = subs.indexOfFirst { it.first == simId }
+        val slot = if (bySub >= 0) bySub else try {
+            android.telephony.SubscriptionManager.getSlotIndex(simId)
+        } catch (e: Throwable) {
+            -1
+        }
+        val multiSim = subs.size > 1 || phoneCount > 1 || simId > 1
+        Triple(multiSim, slot, simId)
+    }
+    if (!info.first) return null
+    return if (info.second >= 0) "${info.second + 1}" else if (info.third >= 1) "${info.third}" else null
+}
+
 @Composable
 fun ConversationsPage(
     onOpenThread: (Long, String) -> Unit,
@@ -121,6 +206,8 @@ fun ConversationsPage(
     var query by remember { mutableStateOf("") }
     var reload by remember { mutableStateOf(0) }
     var selection by remember { mutableStateOf(setOf<Long>()) }
+    var newMessage by remember { mutableStateOf(false) }
+    var simByThread by remember { mutableStateOf(mapOf<Long, Int>()) }
 
     LaunchedEffect(reload) {
         val loaded = withContext(Dispatchers.IO) { Sms.threads(ctx) }
@@ -130,16 +217,18 @@ fun ConversationsPage(
         archived = withContext(Dispatchers.IO) {
             ThreadFlags.archived(ctx) + ThreadFlags.locallyArchived(ctx)
         }
+        simByThread = loaded.associate { it.id to it.simId }
         names = withContext(Dispatchers.IO) {
             loaded.take(150).associate { it.address to Contacts.nameFor(ctx, it.address) }
         }
     }
 
-    // all list rules live in InboxPolicy so they are unit-tested without Android
-    val shown = InboxPolicy.order(
+    // list rules stay in InboxPolicy so they are unit-tested without Android
+    val base = InboxPolicy.order(
         InboxPolicy.visible(threads.map { it.toRow() }, archived, archivedMode, query, names),
         pinned
     )
+    val shown = base
 
     fun archiveThreads(ids: Set<Long>) = scope.launch {
         withContext(Dispatchers.IO) { ids.forEach { ThreadFlags.setArchived(ctx, it, !archivedMode) } }
@@ -159,85 +248,142 @@ fun ConversationsPage(
         reload++
     }
 
-    Column(Modifier.fillMaxSize()) {
-        if (selection.isNotEmpty()) {
-            Row(
-                Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant)
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { selection = emptySet() }) {
-                    Icon(Icons.Filled.Close, contentDescription = "cancel")
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            if (selection.isNotEmpty()) {
+                Row(
+                    Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { selection = emptySet() }) {
+                        Icon(Icons.Filled.Close, contentDescription = "cancel")
+                    }
+                    Text("${selection.size} selected", style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.weight(1f))
+                    TextButton(onClick = { markRead(selection) }) { Text("Read") }
+                    TextButton(onClick = { archiveThreads(selection) }) {
+                        Text(if (archivedMode) "Unarchive" else "Archive")
+                    }
+                    TextButton(onClick = { deleteThreads(selection) }) { Text("Delete") }
                 }
-                Text("${selection.size} selected", style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.weight(1f))
-                TextButton(onClick = { markRead(selection) }) { Text("Read") }
-                TextButton(onClick = { archiveThreads(selection) }) {
-                    Text(if (archivedMode) "Unarchive" else "Archive")
-                }
-                TextButton(onClick = { deleteThreads(selection) }) { Text("Delete") }
+            } else {
+                SearchPill(query) { query = it }
             }
-        } else {
-            OutlinedTextField(
-                query, { query = it },
-                placeholder = { Text("Search messages") },
-                singleLine = true,
-                shape = RoundedCornerShape(24.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)
-            )
-        }
 
-        if (shown.isEmpty()) {
-            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(if (archivedMode) "No archived conversations" else "No conversations",
-                    style = MaterialTheme.typography.titleMedium)
-                Text(
-                    if (archivedMode) "Swipe a conversation left to archive it."
-                    else "Messages appear here once SMS arrives.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(shown, key = { it.id }) { row ->
-                    val selected = row.id in selection
-                    SwipeRow(
-                        row = row,
-                        name = names[row.address]?.takeIf { Contacts.digits(it) != Contacts.digits(row.address) },
-                        pinned = row.id in pinned,
-                        muted = row.id in muted,
-                        selected = selected,
-                        selectionMode = selection.isNotEmpty(),
-                        onClick = {
-                            if (selection.isNotEmpty()) {
-                                selection = if (selected) selection - row.id else selection + row.id
-                            } else {
-                                Sms.markThreadRead(ctx, row.id)
-                                onOpenThread(row.id, row.address)
-                            }
-                        },
-                        onLongClick = {
-                            selection = if (selected) selection - row.id else selection + row.id
-                        },
-                        onArchive = { archiveThreads(setOf(row.id)) },
-                        onToggleRead = {
-                            scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    val cv = ContentValues()
-                                    cv.put(Telephony.Sms.READ, if (row.unread > 0) 1 else 0)
-                                    ctx.contentResolver.update(
-                                        Telephony.Sms.CONTENT_URI, cv,
-                                        "${Telephony.Sms.THREAD_ID}=?", arrayOf(row.id.toString())
-                                    )
-                                }
-                                reload++
-                            }
-                        }
+            if (shown.isEmpty()) {
+                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(if (archivedMode) "No archived conversations" else "No messages",
+                        style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (archivedMode) "Swipe a conversation left to archive it."
+                        else "New SMS will show up here.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+            } else {
+                LazyColumn(Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 96.dp)) {
+                    items(shown, key = { it.id }) { row ->
+                        val selected = row.id in selection
+                        SwipeRow(
+                            row = row,
+                            name = names[row.address]?.takeIf { Contacts.digits(it) != Contacts.digits(row.address) },
+                            pinned = row.id in pinned,
+                            muted = row.id in muted,
+                            selected = selected,
+                            selectionMode = selection.isNotEmpty(),
+                            onClick = {
+                                if (selection.isNotEmpty()) {
+                                    selection = if (selected) selection - row.id else selection + row.id
+                                } else {
+                                    Sms.markThreadRead(ctx, row.id)
+                                    onOpenThread(row.id, row.address)
+                                }
+                            },
+                            onLongClick = {
+                                selection = if (selected) selection - row.id else selection + row.id
+                            },
+                            simId = simByThread[row.id] ?: -1,
+                            onArchive = { archiveThreads(setOf(row.id)) },
+                            onToggleRead = {
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        val cv = ContentValues()
+                                        cv.put(Telephony.Sms.READ, if (row.unread > 0) 1 else 0)
+                                        ctx.contentResolver.update(
+                                            Telephony.Sms.CONTENT_URI, cv,
+                                            "${Telephony.Sms.THREAD_ID}=?", arrayOf(row.id.toString())
+                                        )
+                                    }
+                                    reload++
+                                }
+                            }
+                        )
+                    }
+                }
             }
+        }
+
+        if (!archivedMode && selection.isEmpty()) {
+            FloatingActionButton(
+                onClick = { newMessage = true },
+                containerColor = FAB_AMBER,
+                contentColor = Color.White,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp)
+            ) { Icon(Icons.Filled.Add, contentDescription = "new message") }
+        }
+    }
+
+    if (newMessage) {
+        var number by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { newMessage = false },
+            title = { Text("New message") },
+            text = {
+                OutlinedTextField(
+                    number, { number = it },
+                    label = { Text("phone number") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(enabled = Contacts.digits(number).length >= 4, onClick = {
+                    newMessage = false
+                    onOpenThread(-1L, number)
+                }) { Text("Open") }
+            },
+            dismissButton = { TextButton(onClick = { newMessage = false }) { Text("Cancel") } }
+        )
+    }
+}
+
+/** MIUI search field: pill, filled surface, no border */
+@Composable
+private fun SearchPill(query: String, onChange: (String) -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(24.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).height(48.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 16.dp)) {
+            Icon(Icons.Filled.Search, contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            BasicTextField(
+                value = query,
+                onValueChange = onChange,
+                singleLine = true,
+                textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp),
+                modifier = Modifier.weight(1f).padding(start = 12.dp),
+                decorationBox = { inner ->
+                    if (query.isEmpty()) Text("Search messages", fontSize = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    inner()
+                }
+            )
         }
     }
 }
@@ -251,6 +397,7 @@ private fun SwipeRow(
     muted: Boolean,
     selected: Boolean,
     selectionMode: Boolean,
+    simId: Int,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onArchive: () -> Unit,
@@ -279,10 +426,11 @@ private fun SwipeRow(
             ) { Text(label, style = MaterialTheme.typography.labelLarge) }
         }
     ) {
-        ConversationRow(row, name, pinned, muted, selected, selectionMode, onClick, onLongClick)
+        ConversationRow(row, name, pinned, muted, selected, selectionMode, simId, onClick, onLongClick)
     }
 }
 
+/** MIUI row: 56dp avatar, 16sp title, 15sp preview, dot + 18dp badge, no divider */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ConversationRow(
@@ -292,6 +440,7 @@ private fun ConversationRow(
     muted: Boolean,
     selected: Boolean,
     selectionMode: Boolean,
+    simId: Int,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
@@ -302,64 +451,75 @@ private fun ConversationRow(
                 else MaterialTheme.colorScheme.background
             )
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (selectionMode) Checkbox(checked = selected, onCheckedChange = { onClick() })
-        Avatar(row.address, 52.dp, 16)
-        Column(Modifier.weight(1f).padding(start = 12.dp)) {
+        Avatar(row.address, 56.dp, 17, neutral = true)
+        Column(Modifier.weight(1f).padding(start = 16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (pinned) Icon(
                     Icons.Filled.Star, contentDescription = "pinned",
-                    tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp)
+                    tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp)
                 )
                 Text(
-                    name ?: row.address.ifBlank { "Unknown" },
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = if (row.unread > 0) FontWeight.Bold else FontWeight.Medium,
+                    name ?: Contacts.displayName(row.address),
+                    fontSize = 16.sp,
+                    fontWeight = if (row.unread > 0) FontWeight.SemiBold else FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(start = if (pinned) 4.dp else 0.dp)
+                    modifier = Modifier.weight(1f).padding(start = if (pinned) 6.dp else 0.dp)
                 )
-                if (muted) Text("muted", style = MaterialTheme.typography.labelSmall,
+                if (muted) Text("muted", fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(end = 6.dp))
                 Text(
                     timeLabel(row.date),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (row.unread > 0) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 3.dp)) {
-                if (row.outgoing) Text("✓ ", style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val snippet = row.snippet.replace('\n', ' ')
                 Text(
-                    row.snippet.replace('\n', ' '),
-                    style = MaterialTheme.typography.bodyMedium,
+                    if (isPersian(snippet)) rtlIsolated(snippet) else snippet,
+                    fontSize = 15.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = if (isPersian(snippet)) TextAlign.Right else TextAlign.Start,
                     maxLines = 2, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
                 if (row.unread > 0) {
                     Box(
-                        Modifier.padding(start = 8.dp).size(22.dp).clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary),
+                        Modifier.padding(start = 8.dp).height(18.dp).widthIn(min = 18.dp)
+                            .clip(RoundedCornerShape(5.dp)).background(BADGE_GREY),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("${row.unread}", color = MaterialTheme.colorScheme.onPrimary,
-                            style = MaterialTheme.typography.labelMedium, fontSize = 11.sp)
+                        Text("${row.unread}", color = Color.White, fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
                     }
+                }
+            }
+            // which SIM the newest message of this thread arrived on
+            if (multiSim() && simId >= 0) {
+                Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    SimBadge(simId)
+                    Text("SIM ${simLabel(simId) ?: ""}", fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp))
                 }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val prefs = remember { ctx.getSharedPreferences("drafts", 0) }
+    var resolvedId by remember { mutableStateOf(threadId) }
     var messages by remember { mutableStateOf(listOf<Sms.Message>()) }
     var draft by remember { mutableStateOf(prefs.getString(threadId.toString(), "").orEmpty()) }
     var name by remember { mutableStateOf<String?>(null) }
@@ -368,18 +528,36 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
     var details by remember { mutableStateOf<Sms.Message?>(null) }
     var pickSim by remember { mutableStateOf(false) }
     var blocked by remember { mutableStateOf(Blocked.isBlocked(ctx, address)) }
-    var pinned by remember { mutableStateOf(ThreadFlags.isPinned(ctx, threadId)) }
-    var muted by remember { mutableStateOf(ThreadFlags.isMuted(ctx, threadId)) }
+    var pinned by remember { mutableStateOf(ThreadFlags.isPinned(ctx, resolvedId)) }
+    var muted by remember { mutableStateOf(ThreadFlags.isMuted(ctx, resolvedId)) }
     var findOpen by remember { mutableStateOf(false) }
     var find by remember { mutableStateOf("") }
+    var pins by remember { mutableStateOf(MessagePins.list(ctx, resolvedId)) }
+    // which SIM replies go out on; defaults to the SIM the last incoming message arrived on
+    var sendSim by remember { mutableStateOf<Int?>(null) }
+    var chooseSim by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     fun reload() = scope.launch {
-        messages = withContext(Dispatchers.IO) { Sms.messages(ctx, threadId) }
+        val id = withContext(Dispatchers.IO) {
+            if (threadId > 0) threadId else Sms.threadIdFor(ctx, address) ?: 0L
+        }
+        resolvedId = id
+        messages = withContext(Dispatchers.IO) { Sms.messages(ctx, id) }
         if (name == null) name = withContext(Dispatchers.IO) {
             Contacts.nameFor(ctx, address)?.takeIf { Contacts.digits(it) != Contacts.digits(address) }
         }
-        withContext(Dispatchers.IO) { Sms.markThreadRead(ctx, threadId) }
+        if (sendSim == null) {
+            val incomingSim = messages.lastOrNull { it.incoming }?.simId?.takeIf { it >= 0 }
+            sendSim = incomingSim ?: withContext(Dispatchers.IO) { Sms.sims(ctx).firstOrNull()?.first }
+        }
+        if (id > 0) {
+            withContext(Dispatchers.IO) { Sms.markThreadRead(ctx, id) }
+            MessagePins.prune(ctx, id, messages.map { it.id }.toSet())
+            pins = MessagePins.list(ctx, id)
+            pinned = ThreadFlags.isPinned(ctx, id)
+            muted = ThreadFlags.isMuted(ctx, id)
+        }
     }
     LaunchedEffect(threadId) { reload() }
     LaunchedEffect(messages.size) {
@@ -403,22 +581,37 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
     val visible = if (find.isBlank()) messages else messages.filter { it.body.contains(find, true) }
 
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.Filled.ArrowBack, contentDescription = "back") }
-            Avatar(address, 42.dp, 14)
-            Column(Modifier.weight(1f).padding(start = 10.dp)) {
-                Text(name ?: address.ifBlank { "Unknown" },
-                    style = MaterialTheme.typography.titleMedium, maxLines = 1,
+            Avatar(address, 38.dp, 13, neutral = true)
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text(name ?: Contacts.displayName(address),
+                    fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface, maxLines = 1,
                     overflow = TextOverflow.Ellipsis)
-                if (name != null || blocked || muted) Text(
+                Text(
                     listOfNotNull(
                         if (blocked) "blocked" else null,
                         if (muted) "muted" else null,
-                        if (name != null) address else null
+                        // do not print the same string twice when the display name is the number
+                        address.takeIf {
+                            it.isNotBlank() && it != name && Contacts.digits(it) != Contacts.digits(name.orEmpty())
+                        }
                     ).joinToString(" · "),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
+            }
+            if (multiSim() && (sendSim ?: -1) >= 0) {
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(end = 4.dp)) {
+                    SimBadge(sendSim ?: -1, 16, 10)
+                    Text("SIM ${simLabel(sendSim ?: -1) ?: ""}", fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp))
+                }
             }
             IconButton(onClick = { findOpen = !findOpen; if (!findOpen) find = "" }) {
                 Icon(Icons.Filled.Search, contentDescription = "find in conversation")
@@ -428,33 +621,50 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
                     Icon(Icons.Filled.MoreVert, contentDescription = "menu")
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(text = { Text("Call") }, onClick = {
+                    DropdownMenuItem(text = { Text("Call") },
+                        leadingIcon = { Icon(Icons.Filled.Phone, null, modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        onClick = { menuOpen = false; dial(ctx, address) })
+                    DropdownMenuItem(text = { Text(if (pinned) "Unpin" else "Pin to top") },
+                        leadingIcon = { Icon(Icons.Filled.Star, null, modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        onClick = {
                         menuOpen = false
-                        dial(ctx, address)
-                    })
-                    DropdownMenuItem(text = { Text(if (pinned) "Unpin" else "Pin to top") }, onClick = {
-                        menuOpen = false
-                        ThreadFlags.togglePin(ctx, threadId)
+                        if (resolvedId > 0) ThreadFlags.togglePin(ctx, resolvedId)
                         pinned = !pinned
                     })
-                    DropdownMenuItem(text = { Text(if (muted) "Unmute" else "Mute") }, onClick = {
+                    DropdownMenuItem(text = { Text(if (muted) "Unmute" else "Mute") },
+                        leadingIcon = { Icon(Icons.Filled.Notifications, null, modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        onClick = {
                         menuOpen = false
-                        ThreadFlags.toggleMute(ctx, threadId)
+                        if (resolvedId > 0) ThreadFlags.toggleMute(ctx, resolvedId)
                         muted = !muted
                     })
-                    DropdownMenuItem(text = { Text(if (blocked) "Unblock sender" else "Block sender") }, onClick = {
+                    DropdownMenuItem(text = { Text(if (blocked) "Unblock sender" else "Block sender") },
+                        leadingIcon = { Icon(Icons.Filled.Warning, null, modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        onClick = {
                         menuOpen = false
                         if (blocked) Blocked.remove(ctx, address) else Blocked.add(ctx, address)
                         blocked = !blocked
                     })
-                    DropdownMenuItem(text = { Text("Archive") }, onClick = {
+                    DropdownMenuItem(text = { Text("Archive") },
+                        leadingIcon = { Icon(Icons.Filled.List, null, modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        onClick = {
                         menuOpen = false
                         scope.launch {
-                            withContext(Dispatchers.IO) { ThreadFlags.setArchived(ctx, threadId, true) }
+                            withContext(Dispatchers.IO) {
+                                if (resolvedId > 0) ThreadFlags.setArchived(ctx, resolvedId, true)
+                            }
                             onBack()
                         }
                     })
-                    DropdownMenuItem(text = { Text("Mark as unread") }, onClick = {
+                    DropdownMenuItem(text = { Text("Mark as unread") },
+                        leadingIcon = { Icon(Icons.Filled.MailOutline, null, modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        onClick = {
                         menuOpen = false
                         scope.launch {
                             withContext(Dispatchers.IO) {
@@ -462,16 +672,21 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
                                 cv.put(Telephony.Sms.READ, 0)
                                 ctx.contentResolver.update(
                                     Telephony.Sms.CONTENT_URI, cv,
-                                    "${Telephony.Sms.THREAD_ID}=?", arrayOf(threadId.toString())
+                                    "${Telephony.Sms.THREAD_ID}=?", arrayOf(resolvedId.toString())
                                 )
                             }
                             onBack()
                         }
                     })
-                    DropdownMenuItem(text = { Text("Delete conversation") }, onClick = {
+                    DropdownMenuItem(text = { Text("Delete conversation") },
+                        leadingIcon = { Icon(Icons.Filled.Delete, null, modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.error) },
+                        onClick = {
                         menuOpen = false
                         scope.launch {
-                            withContext(Dispatchers.IO) { Sms.deleteThread(ctx, threadId) }
+                            withContext(Dispatchers.IO) {
+                                if (resolvedId > 0) Sms.deleteThread(ctx, resolvedId)
+                            }
                             onBack()
                         }
                     })
@@ -493,17 +708,52 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
             )
         }
 
-        LazyColumn(Modifier.weight(1f).padding(horizontal = 10.dp), state = listState) {
+        val bannerId = InboxPolicy.pinnedBanner(pins, messages.map { it.id })
+        val banner = messages.firstOrNull { it.id == bannerId }
+        if (banner != null) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)
+                    .combinedClickable(onClick = {
+                        val idx = visible.indexOfFirst { it.id == banner.id }
+                        if (idx >= 0) scope.launch { listState.animateScrollToItem(idx) }
+                    }, onLongClick = {
+                        if (resolvedId > 0) MessagePins.toggle(ctx, resolvedId, banner.id)
+                        pins = MessagePins.list(ctx, resolvedId)
+                    })
+            ) {
+                Row(Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Star, contentDescription = "pinned message",
+                        tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(14.dp))
+                    Text(banner.body.replace('\n', ' '), fontSize = 12.sp, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(start = 6.dp))
+                    if (pins.size > 1) Text("${pins.size} pinned", fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+
+        LazyColumn(Modifier.weight(1f).padding(horizontal = 12.dp), state = listState) {
             itemsIndexed(visible) { i, m ->
                 val prev = visible.getOrNull(i - 1)
                 if (prev == null || dayLabel(prev.date) != dayLabel(m.date)) {
-                    Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
-                        Text(dayLabel(m.date), style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Box(Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center) {
+                        Surface(color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(12.dp)) {
+                            Text(dayLabel(m.date), fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp))
+                        }
                     }
                 }
+                val grouped = prev != null && prev.incoming == m.incoming && m.date - prev.date < 3 * 60_000
                 Bubble(
                     m = m,
+                    grouped = grouped,
                     onLongPress = { selected = m },
                     onUrl = { url -> openUrl(ctx, url) },
                     onCall = { number -> dial(ctx, number) },
@@ -519,35 +769,83 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
         }
 
         Row(
-            Modifier.fillMaxWidth().padding(8.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedTextField(
-                draft, { draft = it },
-                placeholder = { Text("Text message") },
-                shape = RoundedCornerShape(22.dp),
-                modifier = Modifier.weight(1f), maxLines = 5
-            )
-            IconButton(
-                enabled = draft.isNotBlank(),
-                onClick = {
-                    val sims = Sms.sims(ctx)
-                    if (sims.size > 1) pickSim = true else doSend(draft, sims.firstOrNull()?.first)
-                },
-                modifier = Modifier.size(48.dp).clip(CircleShape)
-                    .background(
-                        if (draft.isNotBlank()) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.surfaceVariant
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(24.dp),
+                modifier = Modifier.weight(1f)
+            ) {
+                Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    BasicTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp),
+                        maxLines = 5,
+                        modifier = Modifier.weight(1f),
+                        decorationBox = { inner ->
+                            if (draft.isEmpty()) Text("Text message", fontSize = 16.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            inner()
+                        }
                     )
+                    if (multiSim()) {
+                        Box(
+                            Modifier.padding(start = 8.dp).size(24.dp).clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.background)
+                                .combinedClickable(onClick = { chooseSim = true }, onLongClick = {}),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if ((sendSim ?: -1) >= 0) SimBadge(sendSim ?: -1, 16, 10)
+                            else Text("SIM", fontSize = 8.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+            Box(
+                Modifier.size(48.dp).clip(CircleShape).background(
+                    if (draft.isNotBlank()) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.surfaceVariant
+                ).combinedClickable(onClick = {
+                    if (draft.isNotBlank()) doSend(draft, sendSim)
+                }, onLongClick = {}),
+                contentAlignment = Alignment.Center
             ) {
                 Icon(
                     Icons.Filled.Send, contentDescription = "send",
                     tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.onPrimary
-                    else MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
                 )
             }
         }
+    }
+
+    if (chooseSim) {
+        val sims = Sms.sims(ctx)
+        AlertDialog(
+            onDismissRequest = { chooseSim = false },
+            title = { Text("Send with") },
+            text = {
+                Column {
+                    sims.forEach { (sub, label) ->
+                        TextButton(onClick = { sendSim = sub; chooseSim = false }) {
+                            Text(
+                                (if (sub == (sendSim ?: -1)) "✓ " else "") + label +
+                                    " (SIM ${simLabel(sub) ?: "-"})"
+                            )
+                        }
+                    }
+                    if (sims.isEmpty()) Text("No SIM information available",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = { TextButton(onClick = { chooseSim = false }) { Text("Cancel") } }
+        )
     }
 
     if (pickSim) {
@@ -566,27 +864,59 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
         )
     }
 
-    selected?.let { m ->
-        AlertDialog(
+    if (selected != null) {
+        val m = selected!!
+        ModalBottomSheet(
             onDismissRequest = { selected = null },
-            title = { Text("Message") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    TextButton(onClick = { copy(ctx, m.body); selected = null }) { Text("Copy") }
-                    TextButton(onClick = { draft = m.body; selected = null }) { Text("Forward") }
-                    TextButton(onClick = { share(ctx, m.body); selected = null }) { Text("Share") }
-                    TextButton(onClick = { details = m; selected = null }) { Text("Details") }
-                    TextButton(onClick = {
-                        scope.launch {
-                            withContext(Dispatchers.IO) { Sms.deleteMessage(ctx, m.id) }
-                            selected = null
-                            reload()
-                        }
-                    }) { Text("Delete") }
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
+            Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+                Text(
+                    m.body.replace('\n', ' '),
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+                )
+                Divider(color = MaterialTheme.colorScheme.surfaceVariant)
+                SheetAction("Copy") { copy(ctx, m.body); selected = null }
+                SheetAction(
+                    if (m.id in pins) "Unpin message" else "Pin message",
+                    icon = { Icon(Icons.Filled.Star, null, modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.primary) }
+                ) {
+                    if (resolvedId > 0) MessagePins.toggle(ctx, resolvedId, m.id)
+                    pins = MessagePins.list(ctx, resolvedId)
+                    selected = null
                 }
-            },
-            confirmButton = { TextButton(onClick = { selected = null }) { Text("Close") } }
-        )
+                SheetAction("Forward", icon = {
+                    Icon(Icons.Filled.Send, null, modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }) { draft = m.body; selected = null }
+                SheetAction("Share", icon = {
+                    Icon(Icons.Filled.Share, null, modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }) { share(ctx, m.body); selected = null }
+                SheetAction("Details", icon = {
+                    Icon(Icons.Filled.Info, null, modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }) { details = m; selected = null }
+                SheetAction("Call sender", icon = {
+                    Icon(Icons.Filled.Phone, null, modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }) { dial(ctx, address); selected = null }
+                SheetAction("Delete", danger = true, icon = {
+                    Icon(Icons.Filled.Delete, null, modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.error)
+                }) {
+                    scope.launch {
+                        withContext(Dispatchers.IO) { Sms.deleteMessage(ctx, m.id) }
+                        selected = null
+                        reload()
+                    }
+                }
+            }
+        }
     }
 
     details?.let { m ->
@@ -600,6 +930,7 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
                     Text("direction: ${if (m.incoming) "received" else "sent"}")
                     Text("row id: ${m.id}")
                     Text("thread: ${m.threadId}")
+                    Text("sim: ${if (m.simId >= 0) m.simId.toString() else "unknown"}")
                 }
             },
             confirmButton = { TextButton(onClick = { details = null }) { Text("Close") } }
@@ -607,10 +938,12 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
     }
 }
 
+/** MIUI bubble: no tail, 18dp radius, timestamp above the bubble instead of inside it */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Bubble(
     m: Sms.Message,
+    grouped: Boolean,
     onLongPress: () -> Unit,
     onUrl: (String) -> Unit,
     onCall: (String) -> Unit,
@@ -618,55 +951,76 @@ private fun Bubble(
 ) {
     val mine = !m.incoming
     val bg = if (mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-    val fg = if (mine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+    val fg = if (mine) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
     val url = InboxPolicy.URL.find(m.body)?.value
     val phone = if (url == null) InboxPolicy.PHONE.find(m.body)?.value else null
 
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 2.dp),
-        horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start
-    ) {
-        Surface(
-            color = bg,
-            shape = RoundedCornerShape(
-                topStart = 16.dp, topEnd = 16.dp,
-                bottomStart = if (mine) 16.dp else 4.dp,
-                bottomEnd = if (mine) 4.dp else 16.dp
-            ),
-            modifier = Modifier.widthIn(max = 330.dp)
-                .combinedClickable(onClick = { url?.let(onUrl) }, onLongClick = onLongPress)
-        ) {
-            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                Text(
-                    m.body,
-                    color = fg,
-                    textAlign = if (m.body.any { it in '\u0600'..'\u06FF' }) TextAlign.Right else TextAlign.Start,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (url != null) Text("open link",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = fg.copy(alpha = 0.9f),
-                        modifier = Modifier.padding(end = 8.dp))
-                    if (phone != null) Text("call",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = fg.copy(alpha = 0.9f),
-                        modifier = Modifier.padding(end = 8.dp))
-                    IncomingSms.otpOf(m.body)?.let {
-                        Text("copy code",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = fg.copy(alpha = 0.9f),
-                            modifier = Modifier.padding(end = 8.dp))
-                    }
-                    Box(Modifier.weight(1f))
+    Column(Modifier.fillMaxWidth().padding(top = if (grouped) 2.dp else 8.dp)) {
+        Row(Modifier.fillMaxWidth(),
+            horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
+            Row(verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
+                if (multiSim()) SimBadge(m.simId)
+                Text(stampFmt.format(Date(m.date)), fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        Row(Modifier.fillMaxWidth(),
+            horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
+            Surface(
+                color = bg,
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier.widthIn(max = 330.dp)
+                    .combinedClickable(onClick = { url?.let(onUrl) }, onLongClick = onLongPress)
+            ) {
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                     Text(
-                        clock.format(Date(m.date)),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = fg.copy(alpha = 0.7f)
+                        if (isPersian(m.body)) rtlIsolated(m.body) else m.body,
+                        color = fg,
+                        fontSize = 16.sp,
+                        textAlign = if (m.body.any { it in '\u0600'..'\u06FF' }) TextAlign.Right else TextAlign.Start,
+                        modifier = Modifier.fillMaxWidth()
                     )
+                    if (url != null || phone != null || IncomingSms.otpOf(m.body) != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(top = 6.dp)) {
+                            if (url != null) Text("open link", fontSize = 11.sp,
+                                color = fg.copy(alpha = 0.85f),
+                                modifier = Modifier.padding(end = 10.dp))
+                            if (phone != null) Text("call", fontSize = 11.sp,
+                                color = fg.copy(alpha = 0.85f),
+                                modifier = Modifier.padding(end = 10.dp))
+                            IncomingSms.otpOf(m.body)?.let {
+                                Text("copy code", fontSize = 11.sp, color = fg.copy(alpha = 0.85f))
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SheetAction(
+    label: String,
+    icon: (@Composable () -> Unit)? = null,
+    danger: Boolean = false,
+    onClick: () -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onClick)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) { icon?.invoke() }
+        Text(
+            label,
+            fontSize = 16.sp,
+            color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(start = 16.dp)
+        )
     }
 }
 

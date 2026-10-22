@@ -50,6 +50,12 @@ object Contacts {
         null
     }
 
+    /** sender label as shown in a list: provider junk like ".IRANCELL." or "**bank**" cleaned up */
+    fun displayName(address: String): String {
+        val trimmed = address.trim().trim('.', '*', ' ', '_')
+        return trimmed.ifBlank { address.ifBlank { "Unknown" } }
+    }
+
     /** contact display name for a number, or null when unknown */
     fun nameFor(ctx: Context, address: String): String? = try {
         val uri = android.net.Uri.withAppendedPath(

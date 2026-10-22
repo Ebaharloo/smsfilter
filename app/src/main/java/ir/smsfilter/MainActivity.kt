@@ -65,6 +65,35 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/** MIUI Messages palette: true-black dark theme, blue accent, grey text. */
+private fun miuiDark() = darkColorScheme(
+    primary = androidx.compose.ui.graphics.Color(0xFF2E7DFF),
+    onPrimary = androidx.compose.ui.graphics.Color.White,
+    secondaryContainer = androidx.compose.ui.graphics.Color(0xFF1A2E4A),
+    onSecondaryContainer = androidx.compose.ui.graphics.Color.White,
+    background = androidx.compose.ui.graphics.Color(0xFF000000),
+    onBackground = androidx.compose.ui.graphics.Color.White,
+    surface = androidx.compose.ui.graphics.Color(0xFF000000),
+    onSurface = androidx.compose.ui.graphics.Color.White,
+    surfaceVariant = androidx.compose.ui.graphics.Color(0xFF262626),
+    onSurfaceVariant = androidx.compose.ui.graphics.Color(0xFF9E9E9E),
+    outline = androidx.compose.ui.graphics.Color(0xFF3A3A3A)
+)
+
+private fun miuiLight() = lightColorScheme(
+    primary = androidx.compose.ui.graphics.Color(0xFF2E7DFF),
+    onPrimary = androidx.compose.ui.graphics.Color.White,
+    secondaryContainer = androidx.compose.ui.graphics.Color(0xFFE3EDFF),
+    onSecondaryContainer = androidx.compose.ui.graphics.Color(0xFF0B1B33),
+    background = androidx.compose.ui.graphics.Color.White,
+    onBackground = androidx.compose.ui.graphics.Color(0xFF111111),
+    surface = androidx.compose.ui.graphics.Color.White,
+    onSurface = androidx.compose.ui.graphics.Color(0xFF111111),
+    surfaceVariant = androidx.compose.ui.graphics.Color(0xFFF2F2F2),
+    onSurfaceVariant = androidx.compose.ui.graphics.Color(0xFF6B6B6B),
+    outline = androidx.compose.ui.graphics.Color(0xFFDADADA)
+)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -119,7 +148,7 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
     }
 
     val base = LocalDensity.current
-    MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
+    MaterialTheme(colorScheme = if (dark) miuiDark() else miuiLight()) {
       CompositionLocalProvider(LocalDensity provides Density(base.density, fontScale)) {
         ModalNavigationDrawer(
             drawerState = drawer,

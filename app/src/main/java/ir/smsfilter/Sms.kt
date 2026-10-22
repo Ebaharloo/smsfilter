@@ -15,13 +15,41 @@ import android.telephony.SubscriptionManager
  */
 object Sms {
 
+    /** which SIM column this provider actually has: "subscription_id", "sim_id", or "" (none) */
+    @Volatile
+    private var simColumn: String? = null
+
+    private fun detectSimColumn(ctx: android.content.Context): String {
+        simColumn?.let { return it }
+        for (candidate in listOf(Telephony.Sms.SUBSCRIPTION_ID, "sim_id")) {
+            val ok = try {
+                // no sortOrder/LIMIT: provider sort orders are not SQL and often reject LIMIT
+                ctx.contentResolver.query(
+                    Telephony.Sms.CONTENT_URI,
+                    arrayOf(Telephony.Sms._ID, candidate),
+                    null, null, null
+                )?.use { it.moveToFirst(); true } ?: false
+            } catch (e: Throwable) {
+                false
+            }
+            android.util.Log.i("SMSSim", "probe $candidate -> $ok")
+            if (ok) {
+                simColumn = candidate
+                return candidate
+            }
+        }
+        simColumn = ""
+        return ""
+    }
+
     data class Thread(
         val id: Long,
         val address: String,
         val snippet: String,
         val date: Long,
         val unread: Int,
-        val outgoing: Boolean
+        val outgoing: Boolean,
+        val simId: Int = -1        // SIM of the newest message in the thread
     )
 
     data class Message(
@@ -30,14 +58,18 @@ object Sms {
         val address: String,
         val body: String,
         val date: Long,
-        val incoming: Boolean
+        val incoming: Boolean,
+        val simId: Int = -1          // subscription_id; -1 = unknown/single-SIM
     )
 
     fun threads(ctx: Context, limit: Int = 300): List<Thread> {
-        val proj = arrayOf(
-            Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS, Telephony.Sms.BODY,
-            Telephony.Sms.DATE, Telephony.Sms.READ, Telephony.Sms.TYPE
-        )
+        val simCol = detectSimColumn(ctx)
+        val proj = (
+            listOf(
+                Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS, Telephony.Sms.BODY,
+                Telephony.Sms.DATE, Telephony.Sms.READ, Telephony.Sms.TYPE
+            ) + if (simCol.isNotEmpty()) listOf(simCol) else emptyList()
+        ).toTypedArray()
         val byThread = LinkedHashMap<Long, Thread>()
         val unread = HashMap<Long, Int>()
         try {
@@ -51,6 +83,7 @@ object Sms {
                     val date = c.getLong(3)
                     val read = c.getInt(4) == 1
                     val type = c.getInt(5)
+                    val simId = if (simCol.isNotEmpty()) try { c.getInt(6) } catch (e: Throwable) { -1 } else -1
                     if (type == Telephony.Sms.MESSAGE_TYPE_INBOX && !read) {
                         unread[tid] = (unread[tid] ?: 0) + 1
                     }
@@ -59,7 +92,8 @@ object Sms {
                     } else if (byThread.size < limit) {
                         byThread[tid] = Thread(
                             id = tid, address = addr, snippet = body, date = date,
-                            unread = 0, outgoing = type == Telephony.Sms.MESSAGE_TYPE_SENT
+                            unread = 0, outgoing = type == Telephony.Sms.MESSAGE_TYPE_SENT,
+                            simId = simId
                         )
                     }
                 }
@@ -72,10 +106,13 @@ object Sms {
 
     fun messages(ctx: Context, threadId: Long): List<Message> {
         val out = ArrayList<Message>()
-        val proj = arrayOf(
-            Telephony.Sms._ID, Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS,
-            Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE
-        )
+        val simCol = detectSimColumn(ctx)
+        val proj = (
+            listOf(
+                Telephony.Sms._ID, Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS,
+                Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE
+            ) + if (simCol.isNotEmpty()) listOf(simCol) else emptyList()
+        ).toTypedArray()
         try {
             ctx.contentResolver.query(
                 Telephony.Sms.CONTENT_URI, proj, "${Telephony.Sms.THREAD_ID}=?",
@@ -88,10 +125,12 @@ object Sms {
                         address = c.getString(2).orEmpty(),
                         body = c.getString(3).orEmpty(),
                         date = c.getLong(4),
-                        incoming = c.getInt(5) == Telephony.Sms.MESSAGE_TYPE_INBOX
+                        incoming = c.getInt(5) == Telephony.Sms.MESSAGE_TYPE_INBOX,
+                        simId = if (simCol.isNotEmpty()) try { c.getInt(6) } catch (e: Throwable) { -1 } else -1
                     )
                 }
             }
+            android.util.Log.i("SMSSim", "thread $threadId rows=${out.size} sims=${out.map { it.simId }.distinct()}")
         } catch (t: Throwable) {
         }
         return out
@@ -124,7 +163,9 @@ object Sms {
     /** active SIMs as (subscriptionId, label) */
     fun sims(ctx: Context): List<Pair<Int, String>> = try {
         val sm = ctx.getSystemService(android.telephony.SubscriptionManager::class.java)
-        sm.activeSubscriptionInfoList.orEmpty().map { info ->
+        val list = sm.activeSubscriptionInfoList
+        android.util.Log.i("SMSSim", "active subs=${list?.size ?: -1}")
+        list.orEmpty().map { info ->
             info.subscriptionId to (info.displayName?.toString() ?: "SIM ${info.simSlotIndex + 1}")
         }
     } catch (t: Throwable) {
@@ -166,13 +207,21 @@ object Sms {
         if (parts.size > 1) sm.sendMultipartTextMessage(address, null, parts, null, null)
         else sm.sendTextMessage(address, null, body, null, null)
 
-        ctx.contentResolver.insert(Telephony.Sms.Sent.CONTENT_URI, ContentValues().apply {
-            put(Telephony.Sms.ADDRESS, address)
-            put(Telephony.Sms.BODY, body)
-            put(Telephony.Sms.DATE, System.currentTimeMillis())
-            put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_SENT)
-            put(Telephony.Sms.STATUS, Telephony.Sms.STATUS_COMPLETE)
-        })
+        try {
+            val simCol = detectSimColumn(ctx)
+            ctx.contentResolver.insert(Telephony.Sms.Sent.CONTENT_URI, ContentValues().apply {
+                if (simCol.isNotEmpty() && subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                    put(simCol, subId)
+                }
+                put(Telephony.Sms.ADDRESS, address)
+                put(Telephony.Sms.BODY, body)
+                put(Telephony.Sms.DATE, System.currentTimeMillis())
+                put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_SENT)
+                put(Telephony.Sms.STATUS, Telephony.Sms.STATUS_COMPLETE)
+            })
+        } catch (e: Throwable) {
+            // the SMS already left the phone; a failed archive copy is not a send failure
+        }
         true
     } catch (t: Throwable) {
         false

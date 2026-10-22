@@ -66,6 +66,13 @@ object InboxPolicy {
 
     fun digestTitle(count: Int): String = "$count تبلیغ فیلتر شد"
 
+    /**
+     * Which pinned message the banner shows: the newest pinned message that is still in the
+     * conversation. A pin whose message was deleted must not leave a dangling banner.
+     */
+    fun pinnedBanner(pinnedIds: Set<Long>, messageIdsOldestFirst: List<Long>): Long? =
+        messageIdsOldestFirst.lastOrNull { it in pinnedIds }
+
     /** regexes shared by the UI for link/number affordances */
     val URL: Regex = Regex("""(https?://|www\.)\S+|\b(?:t\.me|b2n\.ir|yun\.ir|rizy\.ir|zarinp\.al|bit\.ly)/\S+""")
     val PHONE: Regex = Regex("""(?:\+98|0)9\d{9}""")

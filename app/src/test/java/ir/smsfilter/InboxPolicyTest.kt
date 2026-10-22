@@ -66,6 +66,17 @@ class InboxPolicyTest {
     }
 
     @Test
+    fun pinnedBannerShowsNewestPinStillPresent() {
+        // pins 7 and 9, but 9 was deleted: banner falls back to 7
+        assertEquals(7L, InboxPolicy.pinnedBanner(setOf(7, 9), listOf(3, 5, 7)))
+        // both alive: the newest one wins
+        assertEquals(9L, InboxPolicy.pinnedBanner(setOf(7, 9), listOf(3, 7, 9)))
+        // nothing pinned or everything deleted: no banner
+        assertNull(InboxPolicy.pinnedBanner(emptySet(), listOf(3, 7)))
+        assertNull(InboxPolicy.pinnedBanner(setOf(4), listOf(3, 7)))
+    }
+
+    @Test
     fun digestTitleCountsFilteredAds() {
         assertEquals("5 تبلیغ فیلتر شد", InboxPolicy.digestTitle(5))
     }
