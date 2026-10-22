@@ -59,16 +59,26 @@ object ThreadFlags {
     fun setArchived(ctx: Context, threadId: Long, archived: Boolean): Boolean {
         // Always keep the local marker as well: MIUI often reports the update as applied and still
         // shows the thread again, which looked like "archive bounces straight back to the inbox".
+        store(ctx, "archived_local", if (archived) ids(ctx, "archived_local") + threadId
+        else ids(ctx, "archived_local") - threadId)
+        return providerArchive(ctx, threadId, archived)
+    }
+
+    /** same thing for a whole set: one prefs write, then only the provider updates */
+    fun setArchived(ctx: Context, threadIds: Set<Long>, archived: Boolean) {
+        if (threadIds.isEmpty()) return
         val now = ids(ctx, "archived_local")
-        store(ctx, "archived_local", if (archived) now + threadId else now - threadId)
-        return try {
-            val cv = ContentValues().apply { put(Telephony.Threads.ARCHIVED, if (archived) 1 else 0) }
-            ctx.contentResolver.update(
-                Uri.withAppendedPath(CONVERSATIONS, threadId.toString()), cv, null, null
-            ) > 0
-        } catch (t: Throwable) {
-            false
-        }
+        store(ctx, "archived_local", if (archived) now + threadIds else now - threadIds)
+        threadIds.forEach { providerArchive(ctx, it, archived) }
+    }
+
+    private fun providerArchive(ctx: Context, threadId: Long, archived: Boolean): Boolean = try {
+        val cv = ContentValues().apply { put(Telephony.Threads.ARCHIVED, if (archived) 1 else 0) }
+        ctx.contentResolver.update(
+            Uri.withAppendedPath(CONVERSATIONS, threadId.toString()), cv, null, null
+        ) > 0
+    } catch (t: Throwable) {
+        false
     }
 
     fun locallyArchived(ctx: Context): Set<Long> = ids(ctx, "archived_local")
@@ -81,8 +91,29 @@ object ThreadFlags {
         if (threadId !in now) store(ctx, "spam_threads", now + threadId)
     }
 
+    fun markSpam(ctx: Context, threadIds: Set<Long>) {
+        val now = ids(ctx, "spam_threads")
+        val next = now + threadIds.filter { it > 0 }
+        if (next != now) store(ctx, "spam_threads", next)
+    }
+
     fun unmarkSpam(ctx: Context, threadId: Long) {
         val now = ids(ctx, "spam_threads")
         if (threadId in now) store(ctx, "spam_threads", now - threadId)
+    }
+
+    /** an ad conversation lives on the Ads page only: not in the inbox and not in Archive */
+    fun quarantine(ctx: Context, threadId: Long) {
+        if (threadId <= 0) return
+        markSpam(ctx, threadId)
+        setArchived(ctx, threadId, true)
+        Sms.markThreadRead(ctx, threadId)
+    }
+
+    /** "not an ad": clear both marks - un-archiving alone returned it to Archive, not the inbox */
+    fun restore(ctx: Context, threadId: Long) {
+        if (threadId <= 0) return
+        unmarkSpam(ctx, threadId)
+        setArchived(ctx, threadId, false)
     }
 }

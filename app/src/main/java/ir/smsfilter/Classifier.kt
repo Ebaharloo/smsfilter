@@ -34,7 +34,7 @@ class Classifier(
         for (g in rules.spam) {
             var hits = 0
             for (term in g.terms) {
-                val t = squash(normalize(term))
+                val t = rules.sq(term)
                 if (t.isEmpty() || t !in sq) continue
                 score += g.weight
                 why += term
@@ -60,22 +60,21 @@ class Classifier(
         // Measured on 10k real messages: unconditional soft guard leaked 27pp of ads for no
         // extra safety, so soft guard yields to high-confidence model output.
         fun hit(group: String, terms: List<String>): String? =
-            terms.firstOrNull { squash(normalize(it)).let { s -> s.isNotEmpty() && s in sq } }
+            terms.firstOrNull { rules.sq(it).let { s -> s.isNotEmpty() && s in sq } }
                 ?.let { "guard:$group:$it" }
 
         val hasAmount = rules.amountRegex.containsMatchIn(norm)
         var guardHit: String? = null
-        // hard groups first: a soft hit must never shadow a hard one (a fund notice saying
-        // "واریز شد" was matching an earlier soft group and then getting filtered)
-        for ((group, terms) in rules.guardAbs.sortedByDescending { it.first in rules.guardHard }) {
+        // hard groups first (rules.guardAbs is pre-sorted): a soft hit must never shadow a hard one
+        // (a fund notice saying "واریز شد" was matching an earlier soft group and got filtered)
+        for ((group, terms) in rules.guardAbs) {
             if (group == "transaction" && !hasAmount) continue   // confirmations (transaction_confirm) need no amount
             guardHit = hit(group, terms)
             if (guardHit != null) break
         }
-        val p = model?.prob(text) ?: 1.0
-        val sq2 = squash(norm)
+        val p = model?.probNormalized(norm) ?: 1.0
         val hard = guardHit != null && guardHit.substringAfter("guard:").substringBefore(":") in rules.guardHard
-        val learnedHits = learned?.adWordHits(sq2) ?: 0
+        val learnedHits = learned?.adWordHits(sq) ?: 0
         val senderBlocked = learned?.blocked()?.contains(sender) == true
 
         // learned ad phrases beat the soft guard (that is how a "بانک"-mentioning ad gets caught),

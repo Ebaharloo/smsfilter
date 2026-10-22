@@ -38,7 +38,7 @@ class FilterService : NotificationListenerService() {
         super.onCreate()
         android.util.Log.i("SMSFilter", "service onCreate")
         clf = Classifier(RuleSet.load(this), Model.fromAssets(this), Learned(this))
-        store = Store(this)
+        store = Store.get(this)
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL, "Filtered ads", NotificationManager.IMPORTANCE_LOW)
@@ -89,7 +89,7 @@ class FilterService : NotificationListenerService() {
 
             val enabled = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("filter_on", true)
             if (v.label == Label.SPAM && enabled) {
-                suppress(sbn.key, n.group)
+                suppress(sbn.key)
                 filtered++
                 digest()
             }
@@ -103,7 +103,7 @@ class FilterService : NotificationListenerService() {
      * reposts on every conversation update). Never touch the group summary: it represents every
      * conversation, so cancelling it also hides important messages in the same group.
      */
-    private fun suppress(key: String, group: String?) {
+    private fun suppress(key: String) {
         cancelNotification(key)
         android.os.Handler(mainLooper).postDelayed({ cancelNotification(key) }, 1200)
     }

@@ -32,8 +32,11 @@ class Model(j: JSONObject) {
     }
 
     /** spam probability in [0,1] */
-    fun prob(text: String): Double {
-        val s = normalize(text).replace(" ", "")
+    fun prob(text: String): Double = probNormalized(normalize(text))
+
+    /** same, for text the caller already normalized - classification normalizes once, not twice */
+    fun probNormalized(norm: String): Double {
+        val s = norm.replace(" ", "")
         if (s.isEmpty()) return 0.0
         var z = 0.0
         var n = 0
@@ -53,8 +56,14 @@ class Model(j: JSONObject) {
     }
 
     companion object {
-        fun fromAssets(ctx: Context) =
-            Model(JSONObject(ctx.assets.open("model.json").bufferedReader().use { it.readText() }))
+        @Volatile private var cached: Model? = null
+
+        /** parsing rules.json + decoding the weight blob costs ~150ms; once per process is enough */
+        fun fromAssets(ctx: Context): Model = cached ?: synchronized(this) {
+            cached ?: Model(
+                JSONObject(ctx.assets.open("model.json").bufferedReader().use { it.readText() })
+            ).also { cached = it }
+        }
     }
 
     private fun fnv1a(s: String): Int {

@@ -89,9 +89,8 @@ object Sms {
                     if (type == Telephony.Sms.MESSAGE_TYPE_INBOX && !read) {
                         unread[tid] = (unread[tid] ?: 0) + 1
                     }
-                    if (byThread.containsKey(tid)) {
-                        // older message of a thread we already have: unread was counted above
-                    } else if (byThread.size < limit) {
+                    // the newest message of a thread becomes its snippet; older ones only count unread
+                    if (!byThread.containsKey(tid) && byThread.size < limit) {
                         byThread[tid] = Thread(
                             id = tid, address = addr, snippet = body, date = date,
                             unread = 0, outgoing = type == Telephony.Sms.MESSAGE_TYPE_SENT,
@@ -164,16 +163,18 @@ object Sms {
         return null
     }
 
-    fun markThreadRead(ctx: Context, threadId: Long) {
+    fun setThreadRead(ctx: Context, threadId: Long, read: Boolean) {
         try {
-            val cv = ContentValues().apply { put(Telephony.Sms.READ, 1) }
+            val cv = ContentValues().apply { put(Telephony.Sms.READ, if (read) 1 else 0) }
             ctx.contentResolver.update(
                 Telephony.Sms.CONTENT_URI, cv,
-                "${Telephony.Sms.THREAD_ID}=? AND ${Telephony.Sms.READ}=0", arrayOf(threadId.toString())
+                "${Telephony.Sms.THREAD_ID}=?", arrayOf(threadId.toString())
             )
         } catch (t: Throwable) {
         }
     }
+
+    fun markThreadRead(ctx: Context, threadId: Long) = setThreadRead(ctx, threadId, true)
 
     fun deleteMessage(ctx: Context, id: Long): Boolean = try {
         ctx.contentResolver.delete(Telephony.Sms.CONTENT_URI, "${Telephony.Sms._ID}=?", arrayOf(id.toString())) > 0
@@ -191,6 +192,45 @@ object Sms {
         val fresh = computeSims(ctx)
         simsCache = now to fresh
         return fresh
+    }
+
+    @Volatile
+    private var multiSimCache: Pair<Long, Boolean>? = null
+
+    /** true when the phone actually has more than one SIM; badge only makes sense then */
+    fun multiSim(ctx: Context): Boolean {
+        val now = android.os.SystemClock.elapsedRealtime()
+        multiSimCache?.let { if (now - it.first < 60_000) return it.second }
+        val phoneCount = try {
+            ctx.getSystemService(android.telephony.TelephonyManager::class.java)?.phoneCount ?: 0
+        } catch (t: Throwable) {
+            0
+        }
+        val v = sims(ctx).size > 1 || phoneCount > 1
+        multiSimCache = now to v
+        return v
+    }
+
+    /**
+     * Which SIM a message belongs to, as "1"/"2".
+     * SubscriptionManager is locked down on MIUI (activeSubscriptionInfoList returns 0 even for the
+     * default SMS app), so the label falls back to the slot index and then to the raw sub id.
+     */
+    fun simLabel(ctx: Context, simId: Int): String? {
+        if (simId < 0) return null
+        if (!multiSim(ctx) && simId <= 1) return null
+        val subs = sims(ctx)
+        val bySub = subs.indexOfFirst { it.first == simId }
+        val slot = if (bySub >= 0) bySub else try {
+            android.telephony.SubscriptionManager.getSlotIndex(simId)
+        } catch (t: Throwable) {
+            -1
+        }
+        return when {
+            slot >= 0 -> "${slot + 1}"
+            simId >= 1 -> "$simId"
+            else -> null
+        }
     }
 
     private fun computeSims(ctx: Context): List<Pair<Int, String>> = try {

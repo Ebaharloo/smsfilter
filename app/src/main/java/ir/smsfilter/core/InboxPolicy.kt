@@ -18,6 +18,9 @@ data class ThreadRow(
 
 enum class Notify { NORMAL, DIGEST, SILENT }
 
+/** result of a horizontal row swipe */
+enum class SwipeAction { NONE, RIGHT, LEFT, HEAVY }
+
 /** inbox tabs, mirroring MIUI's "promotional / financial messages in separate tabs" */
 enum class Tab(val label: String) {
     ALL("All"),
@@ -51,15 +54,27 @@ object InboxPolicy {
     fun inTab(row: ThreadRow, tab: Tab, isContact: Boolean = false): Boolean =
         tab == Tab.ALL || (!isContact && categoryOf(row.snippet) == tab)
 
-    /** counts per tab, for the chip labels */
+    /** counts per tab, for the tab labels */
     fun counts(rows: List<ThreadRow>, contacts: Set<String> = emptySet()): Map<Tab, Int> {
         val out = HashMap<Tab, Int>()
         rows.forEach { row ->
-            val contact = suffix(row.address) in contacts
-            if (!contact) out[categoryOf(row.snippet)] = (out[categoryOf(row.snippet)] ?: 0) + 1
+            if (suffix(row.address) in contacts) return@forEach
+            val tab = categoryOf(row.snippet)
+            out[tab] = (out[tab] ?: 0) + 1
         }
         out[Tab.ALL] = rows.size
         return out
+    }
+
+    /**
+     * Which swipe action a drag offset means. Pure so the gesture contract (read / archive /
+     * filter, and the 60% "heavy" band) is unit-tested instead of eyeballed.
+     */
+    fun swipeAction(dx: Float, widthPx: Float, triggerPx: Float): SwipeAction = when {
+        dx <= -(widthPx * 0.6f) -> SwipeAction.HEAVY
+        dx <= -triggerPx -> SwipeAction.LEFT
+        dx >= triggerPx -> SwipeAction.RIGHT
+        else -> SwipeAction.NONE
     }
 
     /** last 9 digits, the same key the filter compares senders on */

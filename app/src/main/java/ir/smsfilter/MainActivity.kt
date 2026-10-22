@@ -10,17 +10,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -68,15 +64,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
-import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ir.smsfilter.core.InboxPolicy
@@ -86,41 +77,40 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.roundToInt
 
 /** MIUI Messages palette: true-black dark theme, blue accent, grey text. */
 private fun miuiDark() = darkColorScheme(
-    primary = androidx.compose.ui.graphics.Color(0xFF2E7DFF),
+    primary = Color(0xFF2E7DFF),
     onPrimary = androidx.compose.ui.graphics.Color.White,
-    secondaryContainer = androidx.compose.ui.graphics.Color(0xFF1A2E4A),
+    secondaryContainer = Color(0xFF1A2E4A),
     onSecondaryContainer = androidx.compose.ui.graphics.Color.White,
-    background = androidx.compose.ui.graphics.Color(0xFF000000),
+    background = Color(0xFF000000),
     onBackground = androidx.compose.ui.graphics.Color.White,
-    surface = androidx.compose.ui.graphics.Color(0xFF000000),
+    surface = Color(0xFF000000),
     onSurface = androidx.compose.ui.graphics.Color.White,
-    surfaceVariant = androidx.compose.ui.graphics.Color(0xFF262626),
-    onSurfaceVariant = androidx.compose.ui.graphics.Color(0xFF9E9E9E),
-    outline = androidx.compose.ui.graphics.Color(0xFF3A3A3A)
+    surfaceVariant = Color(0xFF262626),
+    onSurfaceVariant = Color(0xFF9E9E9E),
+    outline = Color(0xFF3A3A3A)
 )
 
 private fun miuiLight() = lightColorScheme(
-    primary = androidx.compose.ui.graphics.Color(0xFF2E7DFF),
+    primary = Color(0xFF2E7DFF),
     onPrimary = androidx.compose.ui.graphics.Color.White,
-    secondaryContainer = androidx.compose.ui.graphics.Color(0xFFE3EDFF),
-    onSecondaryContainer = androidx.compose.ui.graphics.Color(0xFF0B1B33),
+    secondaryContainer = Color(0xFFE3EDFF),
+    onSecondaryContainer = Color(0xFF0B1B33),
     background = androidx.compose.ui.graphics.Color.White,
-    onBackground = androidx.compose.ui.graphics.Color(0xFF111111),
+    onBackground = Color(0xFF111111),
     surface = androidx.compose.ui.graphics.Color.White,
-    onSurface = androidx.compose.ui.graphics.Color(0xFF111111),
-    surfaceVariant = androidx.compose.ui.graphics.Color(0xFFF2F2F2),
-    onSurfaceVariant = androidx.compose.ui.graphics.Color(0xFF6B6B6B),
-    outline = androidx.compose.ui.graphics.Color(0xFFDADADA)
+    onSurface = Color(0xFF111111),
+    surfaceVariant = Color(0xFFF2F2F2),
+    onSurfaceVariant = Color(0xFF6B6B6B),
+    outline = Color(0xFFDADADA)
 )
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val store = Store(this)
+        val store = Store.get(this)
         val learned = Learned(this)
         val clf = Classifier(RuleSet.load(this), Model.fromAssets(this), learned)
         val openAddress = intent?.getStringExtra("address")
@@ -150,7 +140,7 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
     val prefs = remember { ctx.getSharedPreferences(PREFS, 0) }
     var theme by remember { mutableStateOf(prefs.getString(KEY_THEME, "auto") ?: "auto") }
     var fontScale by remember { mutableStateOf(prefs.getFloat(KEY_FONT, 1.15f)) }
-    var page by remember { mutableStateOf(if (openAddress != null) Page.Inbox else Page.Inbox) }
+    var page by remember { mutableStateOf(Page.Inbox) }
     var thread by remember { mutableStateOf<Pair<Long, String>?>(null) }  // threadId to address
     // opened from a notification: jump straight into that conversation
     LaunchedEffect(openAddress) {
@@ -161,11 +151,6 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
     }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-
-    // one-time-ish repair: ads filtered before the Ads-page split are still listed in Archive
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) { InboxScan.markKnownSpamThreads(ctx, store) }
-    }
 
     // system back must walk the app's own stack: thread -> list, page -> inbox, not finish()
     BackHandler(enabled = thread != null || page != Page.Inbox) {
@@ -196,7 +181,6 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
                             selected = page == p,
                             onClick = {
                                 page = p
-                                if (p == Page.Inbox && thread != null) { /* keep thread */ }
                                 scope.launch { drawer.close() }
                             },
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
@@ -262,73 +246,6 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
             }
         }
       }
-    }
-}
-
-/** same three-stage swipe as the inbox: right = restore, left = block, far left = delete */
-@Composable
-private fun AdSwipeRow(
-    onRight: () -> Unit,
-    onLeft: () -> Unit,
-    onHeavy: () -> Unit,
-    content: @Composable () -> Unit
-) {
-    val density = LocalDensity.current
-    var widthPx by remember { mutableStateOf(1f) }
-    var dx by remember { mutableStateOf(0f) }
-    val trigger = with(density) { 72.dp.toPx() }
-    val heavyTrigger = widthPx * 0.6f
-    val heavy = dx < -heavyTrigger
-    Box(Modifier.fillMaxWidth().onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }) {
-        if (dx != 0f) {
-            val paint = when {
-                dx > 0 -> MaterialTheme.colorScheme.secondaryContainer
-                heavy -> MaterialTheme.colorScheme.errorContainer
-                else -> MaterialTheme.colorScheme.surfaceVariant
-            }
-            Box(
-                Modifier.matchParentSize().background(paint).padding(horizontal = 24.dp),
-                contentAlignment = if (dx > 0) androidx.compose.ui.Alignment.CenterStart
-                else androidx.compose.ui.Alignment.CenterEnd
-            ) {
-                Text(
-                    when {
-                        dx > 0 -> "Restore"
-                        heavy -> "Delete"
-                        else -> "Block"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                    color = if (heavy) MaterialTheme.colorScheme.onErrorContainer
-                    else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-        Box(
-            Modifier.offset { IntOffset(dx.roundToInt(), 0) }
-                .pointerInput(Unit) {
-                    val width = size.width.toFloat().coerceAtLeast(1f)
-                    val triggerPx = 72.dp.toPx()
-                    val heavyPx = width * 0.6f
-                    var acc = 0f
-                    detectHorizontalDragGestures(
-                        onDragStart = { acc = 0f },
-                        onDragEnd = {
-                            when {
-                                acc <= -heavyPx -> onHeavy()
-                                acc <= -triggerPx -> onLeft()
-                                acc >= triggerPx -> onRight()
-                            }
-                            dx = 0f
-                            acc = 0f
-                        },
-                        onDragCancel = { dx = 0f; acc = 0f },
-                        onHorizontalDrag = { _, delta ->
-                            acc += delta
-                            dx = acc.coerceIn(-width * 0.85f, width * 0.85f)
-                        }
-                    )
-                }
-        ) { content() }
     }
 }
 
@@ -423,19 +340,13 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
             } else {
                 LazyColumn(Modifier.fillMaxSize()) {
                     items(shown, key = { it.id }) { m ->
-                        AdSwipeRow(
+                        SwipeRow(
+                            rightLabel = "Restore",
+                            leftLabel = "Block",
+                            heavyLabel = "Delete",
                             onRight = {
                                 scope.launch {
-                                    withContext(Dispatchers.IO) {
-                                        store.relabel(m.id, Label.IMPORTANT)
-                                        learned.markImportant(m.sender)
-                                        Sms.insertInbox(ctx, m.sender, m.text, m.ts)
-                                        val tid = Sms.threadIdFor(ctx, m.sender)
-                                        if (tid != null) {
-                                            ThreadFlags.unmarkSpam(ctx, tid)
-                                            ThreadFlags.setArchived(ctx, tid, false)
-                                        }
-                                    }
+                                    withContext(Dispatchers.IO) { AdActions.restore(ctx, store, learned, m) }
                                     refresh()
                                     snack.showSnackbar("Restored to inbox")
                                 }
@@ -462,8 +373,8 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                             Column(Modifier.weight(1f).padding(start = 12.dp)) {
                                 Text(Contacts.displayName(m.sender), fontSize = 17.sp, maxLines = 1,
                                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                                Text(
-                                    InboxPolicy.forDisplay(m.text.replace('\n', ' ')),
+                                BodyText(
+                                    m.text.replace('\n', ' '),
                                     fontSize = 14.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
@@ -508,7 +419,7 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
             Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
                 Text(Contacts.displayName(m.sender), fontSize = 17.sp,
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
-                Text(InboxPolicy.forDisplay(m.text), fontSize = 15.sp,
+                BodyText(m.text, fontSize = 15.sp,
                     modifier = Modifier.padding(horizontal = 20.dp))
                 Text("SPAM ${m.score} · ${m.why}", fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -518,11 +429,7 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                     headlineContent = { Text("Not an ad - restore to inbox") },
                     modifier = Modifier.clickable {
                         scope.launch {
-                            withContext(Dispatchers.IO) {
-                                store.relabel(m.id, Label.IMPORTANT)
-                                learned.markImportant(m.sender)
-                                Sms.insertInbox(ctx, m.sender, m.text, m.ts)
-                            }
+                            withContext(Dispatchers.IO) { AdActions.restore(ctx, store, learned, m) }
                             open = null
                             refresh()
                         }
@@ -551,11 +458,6 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
             }
         }
     }
-}
-
-/** tiny holder so AdRow can reach a Context without threading it through every call */
-object LocalContextHolder {
-    var ctx: android.content.Context? = null
 }
 
 /**
@@ -669,8 +571,7 @@ fun TestPage(clf: Classifier) {
             Text(v.label.name, style = MaterialTheme.typography.titleMedium)
             Text("score ${v.score}", style = MaterialTheme.typography.bodySmall)
             Text("why: ${v.why.joinToString(", ")}", style = MaterialTheme.typography.bodySmall)
-            if (v.norm.isNotBlank()) Text("normalized: ${v.norm.take(300)}",
-                style = MaterialTheme.typography.labelSmall)
+            if (v.norm.isNotBlank()) BodyText("normalized: ${v.norm.take(300)}", fontSize = 11.sp)
         }
     }
 }
@@ -711,7 +612,7 @@ fun AppearancePage(
         Text("Preview", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
         ListItem(
             headlineContent = { Text("بانک سامان") },
-            supportingContent = { Text("برداشت مبلغ ۱٬۴۰۲٬۷۵۶ ریال، مانده ۱۹۹٬۰۶۴٬۵۵۲") },
+            supportingContent = { BodyText("برداشت مبلغ ۱٬۴۰۲٬۷۵۶ ریال، مانده ۱۹۹٬۰۶۴٬۵۵۲", fontSize = 14.sp) },
             leadingContent = { Avatar("+98210001", 52.dp, 16) }
         )
     }
@@ -720,7 +621,6 @@ fun AppearancePage(
 @Composable
 fun SettingsPage() {
     val ctx = LocalContext.current
-    LocalContextHolder.ctx = ctx
     val nm = remember { ctx.getSystemService(android.app.NotificationManager::class.java) }
     var filterOn by remember {
         mutableStateOf(ctx.getSharedPreferences(PREFS, 0).getBoolean("filter_on", true))

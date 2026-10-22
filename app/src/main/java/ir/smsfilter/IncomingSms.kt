@@ -36,7 +36,7 @@ class IncomingSms : BroadcastReceiver() {
                         val res = InboxScan.run(
                             ctx,
                             Classifier(RuleSet.load(ctx), Model.fromAssets(ctx), Learned(ctx)),
-                            Store(ctx)
+                            Store.get(ctx)
                         )
                         android.util.Log.i("SMSFilter", "scan done $res")
                     } catch (t: Throwable) {
@@ -80,29 +80,29 @@ class IncomingSms : BroadcastReceiver() {
         val isSpam = filtering && (blocked || verdict?.label == Label.SPAM)
 
         var stored = -1L
-        if (!isSpam) {
-            stored = Sms.insertInbox(ctx, address, body, date)
-        }
-        if (!isSpam && stored == -1L) {
-            // provider refused (role lost mid-flight) - keep our own copy so nothing vanishes
-            try {
-                Store(ctx).add(address, body, verdict ?: Verdict(Label.IMPORTANT, 0, listOf("no-classifier"), body), date)
-            } catch (t: Throwable) {
-            }
-        }
-        try {
-            if (verdict != null) Store(ctx).add(address, body, verdict, date)
+        if (!isSpam) stored = Sms.insertInbox(ctx, address, body, date)
+
+        // one write per message: the classified verdict, or a fail-safe note when the provider
+        // refused the insert (role lost mid-flight) - nothing may vanish
+        val toStore = verdict ?: if (!isSpam && stored == -1L) {
+            Verdict(Label.IMPORTANT, 0, listOf("no-classifier"), body)
+        } else null
+        if (toStore != null) try {
+            Store.get(ctx).add(address, body, toStore, date)
         } catch (t: Throwable) {
         }
 
-        val notifyIdThread = Sms.threadIdFor(ctx, address) ?: -1L
-        val muted = ThreadFlags.isMuted(ctx, notifyIdThread)
+        val threadId = Sms.threadIdFor(ctx, address) ?: -1L
+        val muted = ThreadFlags.isMuted(ctx, threadId)
         // spam/mute policy is pure Kotlin so it is covered by unit tests
-        val decision = ir.smsfilter.core.InboxPolicy.notifyFor(muted, filtering && (blocked || verdict?.label == Label.SPAM))
+        val decision = ir.smsfilter.core.InboxPolicy.notifyFor(muted, isSpam)
 
         val nm = ctx.getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(CHANNEL, "Messages", NotificationManager.IMPORTANCE_HIGH))
-        nm.createNotificationChannel(NotificationChannel(ADS_CHANNEL, "Filtered ads", NotificationManager.IMPORTANCE_LOW))
+        if (!channelsReady) {
+            nm.createNotificationChannel(NotificationChannel(CHANNEL, "Messages", NotificationManager.IMPORTANCE_HIGH))
+            nm.createNotificationChannel(NotificationChannel(ADS_CHANNEL, "Filtered ads", NotificationManager.IMPORTANCE_LOW))
+            channelsReady = true
+        }
 
         if (decision == ir.smsfilter.core.Notify.DIGEST) {
             // one low-priority digest, updated in place - 50 ads/hour must not mean 50 notifications
@@ -126,7 +126,6 @@ class IncomingSms : BroadcastReceiver() {
         }
 
         val notifyId = NOTIF_ID + address.hashCode()
-        val threadId = Sms.threadIdFor(ctx, address) ?: -1L
         val reply = RemoteInput.Builder(KEY_REPLY).setLabel("Reply").build()
         val replyIntent = PendingIntent.getBroadcast(
             ctx, 10, Intent(ctx, IncomingSms::class.java).apply {
@@ -196,6 +195,9 @@ class IncomingSms : BroadcastReceiver() {
         const val ACTION_REPLY = "ir.smsfilter.REPLY"
         const val ACTION_MARK_READ = "ir.smsfilter.MARK_READ"
         const val ACTION_COPY_OTP = "ir.smsfilter.COPY_OTP"
+
+        /** channels are cheap but not free: create them once per process, not per message */
+        @Volatile private var channelsReady = false
 
         fun otpOf(body: String): String? = ir.smsfilter.core.InboxPolicy.otp(body)
     }

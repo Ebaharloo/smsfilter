@@ -2,6 +2,7 @@ package ir.smsfilter
 
 import ir.smsfilter.core.InboxPolicy
 import ir.smsfilter.core.Notify
+import ir.smsfilter.core.SwipeAction
 import ir.smsfilter.core.Tab
 import ir.smsfilter.core.ThreadRow
 import org.junit.Assert.assertEquals
@@ -134,5 +135,87 @@ class InboxPolicyTest {
         assertTrue(!InboxPolicy.URL.containsMatchIn("بانک سامان برداشت 1,000,000"))
         assertTrue(InboxPolicy.PHONE.containsMatchIn("تماس با 09121234567"))
         assertTrue(!InboxPolicy.PHONE.containsMatchIn("مانده 200,000 ریال"))
+    }
+
+    /** the tab names are the user's, not ours: renaming them once got the whole pass rejected */
+    @Test
+    fun tabLabelsAreFixed() {
+        assertEquals(
+            listOf("All", "Transactions", "Codes", "Promotions"),
+            Tab.entries.map { it.label }
+        )
+    }
+
+    /** a contact who writes «تخفیف» belongs to no category tab, but All still counts everyone */
+    @Test
+    fun countsSkipContactsInCategoriesButNotInAll() {
+        val contact = row(4, "+989****8888", "تخفیف گرفتم برایت", 6_000)
+        val contacts = setOf(InboxPolicy.suffix(contact.address))
+        val counts = InboxPolicy.counts(listOf(bank, ad, friend, contact), contacts)
+
+        assertEquals(4, counts[Tab.ALL])
+        assertEquals(1, counts[Tab.TRANSACTIONS])
+        assertEquals(1, counts[Tab.PROMOTIONS])   // the ad only: the contact's «تخفیف» is not counted
+        assertEquals(0, counts[Tab.OTP] ?: 0)
+        assertFalse(InboxPolicy.inTab(contact, Tab.PROMOTIONS, isContact = true))
+        assertTrue(InboxPolicy.inTab(contact, Tab.ALL, isContact = true))
+    }
+
+    /** the swipe contract: 72dp arms the normal action, 60% of the row width arms the heavy one */
+    @Test
+    fun swipeThresholdsAreOrderedAndSymmetric() {
+        val width = 1000f
+        val trigger = 72f
+
+        assertEquals(SwipeAction.NONE, InboxPolicy.swipeAction(0f, width, trigger))
+        assertEquals(SwipeAction.NONE, InboxPolicy.swipeAction(-71f, width, trigger))
+        assertEquals(SwipeAction.LEFT, InboxPolicy.swipeAction(-72f, width, trigger))
+        assertEquals(SwipeAction.LEFT, InboxPolicy.swipeAction(-599f, width, trigger))
+        assertEquals(SwipeAction.HEAVY, InboxPolicy.swipeAction(-600f, width, trigger))
+        assertEquals(SwipeAction.HEAVY, InboxPolicy.swipeAction(-900f, width, trigger))
+        assertEquals(SwipeAction.RIGHT, InboxPolicy.swipeAction(72f, width, trigger))
+        // a wide row cannot make the heavy band narrower than the plain one
+        assertEquals(SwipeAction.HEAVY, InboxPolicy.swipeAction(-500f, 500f, trigger))
+    }
+
+    @Test
+    fun pinnedSortKeepsNewestFirstInsideEachGroup() {
+        val older = row(10, "111", "a", 1_000)
+        val newer = row(11, "222", "b", 3_000)
+        val pinnedOld = row(12, "333", "c", 500)
+
+        val ordered = InboxPolicy.order(listOf(older, newer, pinnedOld), pinnedIds = setOf(12))
+        assertEquals(listOf(12L, 11L, 10L), ordered.map { it.id })
+    }
+
+    /** search must never resurrect a hidden ad, whatever the query says */
+    @Test
+    fun searchStaysInsideTheVisibleList() {
+        val rows = listOf(bank, ad, friend)
+        // the ad is searchable in neither the inbox nor the archive once it is spam-marked
+        assertTrue(InboxPolicy.visible(rows, emptySet(), false, "OFF50", spamIds = setOf(2)).isEmpty())
+        assertTrue(InboxPolicy.visible(rows, setOf(2), true, "OFF50", spamIds = setOf(2)).isEmpty())
+        // the same query still finds the bank message where it is actually visible
+        assertEquals(
+            listOf(1L),
+            InboxPolicy.visible(rows, emptySet(), false, "واریز").map { it.id }
+        )
+    }
+
+    /**
+     * The Ads page shipped left-to-right Persian previews while the inbox was right: every body in
+     * the app must pick its paragraph direction from the same rule, so pin the rule down here.
+     */
+    @Test
+    fun persianBodiesAreDetectedForRtlRendering() {
+        assertTrue(isPersian("برگ‌ریزون قیمت‌های دیجی‌پی نزدیکه"))
+        assertFalse(isPersian("OFF50 code 1234"))
+        // latin-only bodies are left exactly as they are
+        assertEquals("OFF50 20% off", InboxPolicy.forDisplay("OFF50 20% off"))
+        // a Persian body keeps its amounts and links in one piece
+        val ad = "تخفیف ویژه 50% کلیک کنید t.me/xyz"
+        val out = InboxPolicy.forDisplay(ad)
+        assertTrue(out.contains("\u206650\u2069"))
+        assertTrue(out.contains("\u2066t.me/xyz\u2069"))
     }
 }

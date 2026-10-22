@@ -15,8 +15,6 @@ object MessagePins {
         prefs(ctx).edit().putStringSet(threadId.toString(), ids.map { it.toString() }.toSet()).apply()
     }
 
-    fun contains(ctx: Context, threadId: Long, messageId: Long) = messageId in list(ctx, threadId)
-
     fun toggle(ctx: Context, threadId: Long, messageId: Long): Boolean {
         val now = list(ctx, threadId)
         val pinned = messageId !in now

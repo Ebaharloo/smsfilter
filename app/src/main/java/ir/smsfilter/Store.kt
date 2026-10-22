@@ -15,7 +15,16 @@ data class Msg(
     val why: String
 )
 
-class Store(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 3) {
+class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 3) {
+
+    companion object {
+        @Volatile private var inst: Store? = null
+
+        /** one helper (and one connection) per process: the receiver used to open three per SMS */
+        fun get(ctx: Context): Store = inst ?: synchronized(this) {
+            inst ?: Store(ctx.applicationContext).also { inst = it }
+        }
+    }
 
     override fun onCreate(db: SQLiteDatabase) = db.execSQL(
         "CREATE TABLE msg(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, sender TEXT, " +
@@ -54,12 +63,7 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 3) {
         return out
     }
 
-    /** re-classify everything the user has not personally labelled; their edits always win */
-    fun updateVerdict(ts: Long, text: String, v: Verdict) = writableDatabase.execSQL(
-        "UPDATE msg SET label=?, score=?, why=? WHERE ts=? AND text=? AND manual=0",
-        arrayOf(v.label.name, v.score, v.why.joinToString(", "), ts, text)
-    )
-
+    /** the user's own verdict for a row: manual=1 means a rescan never overwrites it */
     fun relabel(id: Long, label: Label) = writableDatabase
         .execSQL("UPDATE msg SET label=?, manual=1 WHERE id=?", arrayOf(label.name, id))
 

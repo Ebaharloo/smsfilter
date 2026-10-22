@@ -9,9 +9,9 @@ import android.provider.Telephony
  * Everything that arrived before this app held the SMS role - or that the model scored below its
  * spam threshold - is still sitting in the inbox. This walks the newest messages, classifies them
  * with the same pipeline the receive path uses, keeps a copy of every ad in our own database and
- * archives the conversations they belong to.
+ * files the conversations they belong to under Ads.
  *
- * Nothing is deleted: archiving is reversible, and the ad copies stay on the Ads page.
+ * Nothing is deleted: the flags are reversible, and the ad copies stay on the Ads page.
  */
 object InboxScan {
 
@@ -21,8 +21,7 @@ object InboxScan {
         ctx: Context,
         clf: Classifier,
         store: Store,
-        limit: Int = 4000,
-        onProgress: (Int) -> Unit = {}
+        limit: Int = 4000
     ): Result {
         val contacts = Contacts.suffixes(ctx)
         val threads = HashSet<Long>()
@@ -63,35 +62,15 @@ object InboxScan {
                         } catch (t: Throwable) {
                         }
                     }
-                    if (scanned % 200 == 0) onProgress(scanned)
                 }
             }
         } catch (t: Throwable) {
             // no permission / provider trouble: report what was done instead of throwing
         }
 
-        threads.forEach { tid ->
-            ThreadFlags.setArchived(ctx, tid, true)
-            ThreadFlags.markSpam(ctx, tid)
-            Sms.markThreadRead(ctx, tid)
-        }
+        ThreadFlags.markSpam(ctx, threads)
+        ThreadFlags.setArchived(ctx, threads, true)
+        threads.forEach { Sms.markThreadRead(ctx, it) }
         return Result(scanned = scanned, spam = spam, threads = threads.size)
-    }
-
-    /**
-     * Conversations whose messages are already in our spam store must not sit in Archive.
-     * Runs on app start so ads filtered before the Ads-page split move out of Archive too.
-     */
-    fun markKnownSpamThreads(ctx: Context, store: Store, limit: Int = 500) {
-        val senders = try {
-            store.list(Label.SPAM, limit).map { it.sender }.distinct()
-        } catch (t: Throwable) {
-            return
-        }
-        senders.forEach { sender ->
-            val tid = Sms.threadIdFor(ctx, sender) ?: return@forEach
-            ThreadFlags.markSpam(ctx, tid)
-            ThreadFlags.setArchived(ctx, tid, true)
-        }
     }
 }
