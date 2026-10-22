@@ -124,6 +124,9 @@ def classify(text: str, sender: str = "", contacts: set[str] | None = None) -> d
     if n_emoji >= 5:
         score += st["emoji_ge5_weight"]
         why.append(f"emoji:{n_emoji}")
+    elif n_emoji >= 2:
+        score += 1
+        why.append(f"emoji:{n_emoji}")
 
     lone = len(re.findall(r"(?<!\S)[آ-یa-z](?!\S)", norm))
     if lone >= 3:
@@ -153,7 +156,12 @@ def classify(text: str, sender: str = "", contacts: set[str] | None = None) -> d
     hard = hard_groups
     soft_conf = RULES["model"]["soft_guard_conf"]
     p_early = MODEL.prob(text) if MODEL is not None else 1.0
-    if hit and (hit.split(":")[1] in hard or p_early < soft_conf):
+    hard_hit = hit is not None and hit.split(":")[1] in hard
+    has_url = bool(URL.search(norm))
+    # emoji-stuffed promo needs a second signal and must never touch a guarded message
+    if not hard_hit and hit is None and n_emoji >= 2 and (has_url or score >= RULES["thresholds"]["unsure"]):
+        return {"label": "SPAM", "score": 70, "p": 1.0, "why": [f"emoji:{n_emoji}"] + why, "norm": norm}
+    if hit and (hard_hit or p_early < soft_conf):
         return {"label": "IMPORTANT", "score": score, "p": p_early, "why": [hit] + why, "norm": norm}
 
     mp = RULES["model"]

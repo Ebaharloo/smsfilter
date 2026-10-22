@@ -46,7 +46,12 @@ class Classifier(
             score += if (short) rules.shortlinkWeight else rules.urlWeight
             why += "url:${u.take(30)}"
         }
-        if (countEmoji(text) >= 5) { score += rules.emojiWeight; why += "emoji" }
+        val emoji = countEmoji(text)
+        val hasUrl = URL.containsMatchIn(norm)
+        when {
+            emoji >= 5 -> { score += rules.emojiWeight; why += "emoji:$emoji" }
+            emoji >= 2 -> { score += 1; why += "emoji:$emoji" }
+        }
         val lone = LONE_LETTER.findAll(norm).count()
         if (lone >= 3) { score += rules.spacedWeight; why += "spaced_letters:$lone" }
         score += rules.unknownSenderWeight
@@ -78,6 +83,16 @@ class Classifier(
         if (!hard) {
             if (senderBlocked) return Verdict(Label.SPAM, 90, listOf("learned:sender") + why, norm)
             if (learnedHits >= 2) return Verdict(Label.SPAM, 80, listOf("learned:words=$learnedHits") + why, norm)
+            // one learned word is enough when the message also looks promotional: an emoji or a link.
+            // Unknown sender alone is NOT a reason to filter - plenty of real people are not in contacts.
+            if (learnedHits >= 1 && (emoji >= 1 || hasUrl)) {
+                return Verdict(Label.SPAM, 78, listOf("learned:words=$learnedHits") + why, norm)
+            }
+        }
+        // emoji-stuffed promo: needs a second signal (link or promo/finance keywords) and must not
+        // touch a guarded message, so a friend's emoji message or a bank notice is never caught here
+        if (!hard && guardHit == null && emoji >= 2 && (hasUrl || score >= rules.thrUnsure)) {
+            return Verdict(Label.SPAM, 70, listOf("emoji:$emoji") + why, norm)
         }
         if (guardHit != null && (hard || p < rules.softGuardConf)) {
             return Verdict(Label.IMPORTANT, score, listOf(guardHit) + why, norm)

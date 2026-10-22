@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -160,6 +161,11 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
     }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    // system back must walk the app's own stack: thread -> list, page -> inbox, not finish()
+    BackHandler(enabled = thread != null || page != Page.Inbox) {
+        if (thread != null) thread = null else page = Page.Inbox
+    }
 
     val systemDark = (ctx.resources.configuration.uiMode and
         android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
