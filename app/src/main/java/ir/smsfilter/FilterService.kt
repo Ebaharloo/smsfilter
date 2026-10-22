@@ -62,6 +62,7 @@ class FilterService : NotificationListenerService() {
             // platform Notification.MessagingStyle has no public extractor; androidx does
             val style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(n)
             val last = style?.messages?.lastOrNull()
+            var smsId = 0L
             var sender = (last?.person?.name?.toString()
                 ?: style?.conversationTitle?.toString()
                 ?: ex.getCharSequence(Notification.EXTRA_TITLE)?.toString()
@@ -76,6 +77,7 @@ class FilterService : NotificationListenerService() {
                 val since = maxOf(lastSmsDate + 1, System.currentTimeMillis() - 20_000)
                 val sms = SmsReader.latest(this, since) ?: return
                 lastSmsDate = sms.date
+                smsId = sms.id
                 text = sms.body
                 if (notifSender.isBlank()) sender = sms.address
             }
