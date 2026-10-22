@@ -9,20 +9,28 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -30,11 +38,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -43,6 +54,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -58,6 +70,8 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import ir.smsfilter.core.InboxPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -198,13 +212,13 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
                             if (open == null) ConversationsPage(
                                 onOpenThread = { id, addr -> thread = id to addr }
                             )
-                            else ThreadPage(open.first, open.second) { thread = null }
+                            else ThreadPage(open.first, open.second, learned) { thread = null }
                         }
                         Page.Archived -> ConversationsPage(
                             onOpenThread = { id, addr -> thread = id to addr },
                             archivedMode = true
                         )
-                        Page.Ads -> AdsPage(store, learned)
+                        Page.Ads -> AdsPage(store, learned) { page = Page.Inbox }
                         Page.Blocked -> BlockedPage()
                         Page.Test -> TestPage(clf)
                         Page.Appearance -> AppearancePage(
@@ -228,12 +242,22 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
     }
 }
 
-/** the filtered ads, kept out of the inbox entirely */
+/**
+ * Filtered ads: the same visual language as the inbox (row height, avatar, one-line preview),
+ * with the controls this page was missing - back, search and an overflow menu.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AdsPage(store: Store, learned: Learned) {
+fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
+    val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var rows by remember { mutableStateOf(listOf<Msg>()) }
     var counts by remember { mutableStateOf(mapOf<Label, Int>()) }
+    var query by remember { mutableStateOf("") }
+    var menuOpen by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
+    var open by remember { mutableStateOf<Msg?>(null) }
+    val snack = remember { SnackbarHostState() }
 
     fun refresh() = scope.launch {
         withContext(Dispatchers.IO) {
@@ -243,48 +267,148 @@ fun AdsPage(store: Store, learned: Learned) {
     }
     LaunchedEffect(Unit) { refresh() }
 
-    Column(Modifier.fillMaxSize().padding(12.dp)) {
-        Text(
-            "ads ${counts[Label.SPAM] ?: 0} · kept ${counts[Label.IMPORTANT] ?: 0} · unsure ${counts[Label.UNSURE] ?: 0}",
-            style = MaterialTheme.typography.bodySmall
-        )
-        if (rows.isEmpty()) {
-            Text("Nothing filtered yet — tap «تبلیغ» on a message to teach the filter.",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(vertical = 12.dp))
-        } else {
-            LazyColumn(Modifier.weight(1f)) {
-                items(rows, key = { it.id }) { m -> AdRow(m, store, learned, ::refresh) }
-            }
+    val shown = remember(rows, query) {
+        if (query.isBlank()) rows
+        else rows.filter {
+            it.text.contains(query, true) || it.sender.contains(query, true)
         }
     }
-}
 
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun AdRow(m: Msg, store: Store, learned: Learned, refresh: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp).combinedClickable(
-        onClick = {}, onLongClick = {}
-    )) {
-        Text("${m.sender}  ${fmt.format(Date(m.ts))}", style = MaterialTheme.typography.labelSmall)
-        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-            Text(m.text, style = MaterialTheme.typography.bodyMedium)
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier.fillMaxWidth().height(56.dp).padding(start = 4.dp, end = 4.dp),
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = "back")
+                }
+                Text("Ads", fontSize = 20.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                    modifier = Modifier.weight(1f))
+                Box {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "options")
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(text = { Text("Delete all ads") },
+                            onClick = { menuOpen = false; confirmClear = true })
+                    }
+                }
+            }
+            SearchPill(query, { query = it }, "Search ads")
+            Text(
+                "filtered ${counts[Label.SPAM] ?: 0} · kept ${counts[Label.IMPORTANT] ?: 0} · unsure ${counts[Label.UNSURE] ?: 0}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+            )
+            if (shown.isEmpty()) {
+                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+                    Text(if (rows.isEmpty()) "Nothing filtered yet" else "No ad matches",
+                        style = MaterialTheme.typography.titleMedium)
+                    Text("Ads the filter catches land here instead of your inbox.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                LazyColumn(Modifier.fillMaxSize()) {
+                    items(shown, key = { it.id }) { m ->
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 92.dp)
+                                .clickable { open = m }
+                                .padding(start = 16.dp, end = 20.dp, top = 14.dp, bottom = 14.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                        ) {
+                            Avatar(m.sender, 40.dp, 14, neutral = true)
+                            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                                Text(Contacts.displayName(m.sender), fontSize = 17.sp, maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                                Text(
+                                    InboxPolicy.forDisplay(m.text.replace('\n', ' ')),
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(top = 3.dp)
+                                )
+                            }
+                            Text(fmt.format(Date(m.ts)), fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
         }
-        Text("SPAM ${m.score} · ${m.why.take(80)}", style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
-        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-            Row {
+        SnackbarHost(snack, modifier = Modifier.align(androidx.compose.ui.Alignment.BottomCenter))
+    }
+
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("Delete all ads?") },
+            text = { Text("Removes the kept ad copies from this app. Your SMS inbox is not touched.") },
+            confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
-                        withContext(Dispatchers.IO) {
-                            store.relabel(m.id, Label.IMPORTANT)
-                            learned.markImportant(m.sender)
-                            // put it back into the real inbox
-                            Sms.insertInbox(LocalContextHolder.ctx!!, m.sender, m.text, m.ts)
-                        }; refresh()
+                        withContext(Dispatchers.IO) { store.deleteAll(Label.SPAM) }
+                        confirmClear = false
+                        refresh()
                     }
-                }) { Text("این مهم است") }
+                }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } }
+        )
+    }
+
+    open?.let { m ->
+        ModalBottomSheet(
+            onDismissRequest = { open = null },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
+            Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+                Text(Contacts.displayName(m.sender), fontSize = 17.sp,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+                Text(InboxPolicy.forDisplay(m.text), fontSize = 15.sp,
+                    modifier = Modifier.padding(horizontal = 20.dp))
+                Text("SPAM ${m.score} · ${m.why}", fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
+                Divider(Modifier.padding(vertical = 6.dp))
+                ListItem(
+                    headlineContent = { Text("Not an ad - restore to inbox") },
+                    modifier = Modifier.clickable {
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                store.relabel(m.id, Label.IMPORTANT)
+                                learned.markImportant(m.sender)
+                                Sms.insertInbox(ctx, m.sender, m.text, m.ts)
+                            }
+                            open = null
+                            refresh()
+                        }
+                    }
+                )
+                ListItem(
+                    headlineContent = { Text("Block this sender") },
+                    modifier = Modifier.clickable {
+                        Blocked.add(ctx, m.sender)
+                        scope.launch {
+                            snack.showSnackbar("${Contacts.displayName(m.sender)} blocked")
+                        }
+                        open = null
+                    }
+                )
+                ListItem(
+                    headlineContent = { Text("Delete this ad") },
+                    modifier = Modifier.clickable {
+                        scope.launch {
+                            withContext(Dispatchers.IO) { store.delete(m.id) }
+                            open = null
+                            refresh()
+                        }
+                    }
+                )
             }
         }
     }

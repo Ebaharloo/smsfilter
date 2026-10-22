@@ -43,15 +43,29 @@ object InboxPolicy {
         }
     }
 
-    fun inTab(row: ThreadRow, tab: Tab): Boolean =
-        tab == Tab.ALL || categoryOf(row.snippet) == tab
+    /**
+     * A saved contact is never a promotion or a transaction: people write words like "تخفیف" or
+     * "واریز" in normal conversation, and filing a friend under Promotions is how a real message
+     * gets missed. Contacts stay in All.
+     */
+    fun inTab(row: ThreadRow, tab: Tab, isContact: Boolean = false): Boolean =
+        tab == Tab.ALL || (!isContact && categoryOf(row.snippet) == tab)
 
     /** counts per tab, for the chip labels */
-    fun counts(rows: List<ThreadRow>): Map<Tab, Int> {
+    fun counts(rows: List<ThreadRow>, contacts: Set<String> = emptySet()): Map<Tab, Int> {
         val out = HashMap<Tab, Int>()
-        rows.forEach { out[categoryOf(it.snippet)] = (out[categoryOf(it.snippet)] ?: 0) + 1 }
+        rows.forEach { row ->
+            val contact = suffix(row.address) in contacts
+            if (!contact) out[categoryOf(row.snippet)] = (out[categoryOf(row.snippet)] ?: 0) + 1
+        }
         out[Tab.ALL] = rows.size
         return out
+    }
+
+    /** last 9 digits, the same key the filter compares senders on */
+    fun suffix(address: String): String {
+        val digits = address.filter { it in '0'..'9' }
+        return digits.takeLast(9)
     }
 
     private val OTP_MARKERS = listOf(
@@ -123,6 +137,36 @@ object InboxPolicy {
      */
     fun pinnedBanner(pinnedIds: Set<Long>, messageIdsOldestFirst: List<Long>): Long? =
         messageIdsOldestFirst.lastOrNull { it in pinnedIds }
+
+    /**
+     * Bidi control characters some senders embed in the message itself (banks love U+202A LRE / U+202C PDF).
+     * They fight the paragraph direction we set, which is how "1,234,567" ends up painted as "756,402,1".
+     */
+    private fun stripBidi(text: String): String = text.filterNot {
+        it == '\u061C' || it in '\u200E'..'\u200F' || it in '\u202A'..'\u202E' ||
+            it in '\u2066'..'\u2069' || it in '\u206A'..'\u206F'
+    }
+
+    /** links, latin tokens carrying a digit, amounts/dates/card numbers */
+    private val LTR_RUN = Regex(
+        "(https?://|www\\.)\\S+" +
+            "|\\b(?:t\\.me|bit\\.ly|b2n\\.ir|yun\\.ir|zarinp\\.al)\\S*" +
+            "|[a-zA-Z0-9-]+\\.(?:ir|com|net|org)\\S*" +
+            // commas stay inside the run: splitting "1,234,567" into three isolates is what
+            // made the amount paint as "756,402,1" inside an RTL paragraph
+            "|[A-Za-z0-9@._,:/٬٫-]*[0-9][A-Za-z0-9@._,:/٬٫-]*" +
+            "|[0-9]"
+    )
+
+    /**
+     * Text ready to paint in an RTL paragraph: every sender-supplied direction mark removed, and each
+     * LTR run wrapped once in LRI/PDI so its internal order survives the surrounding RTL text.
+     */
+    fun forDisplay(text: String): String {
+        val clean = stripBidi(text)
+        return if (clean.none { it in '\u0600'..'\u06FF' }) clean
+        else LTR_RUN.replace(clean) { "\u2066" + it.value + "\u2069" }
+    }
 
     /** regexes shared by the UI for link/number affordances */
     val URL: Regex = Regex("""(https?://|www\.)\S+|\b(?:t\.me|b2n\.ir|yun\.ir|rizy\.ir|zarinp\.al|bit\.ly)/\S+""")

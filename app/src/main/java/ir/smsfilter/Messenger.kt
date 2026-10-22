@@ -159,15 +159,7 @@ private fun isPersian(text: String) = text.any { it in '\u0600'..'\u06FF' }
  * Wrap every numeral run in LRI/PDI so it keeps its internal order inside a Persian sentence.
  * Without this, card numbers and amounts next to colons get re-ordered by the bidi algorithm.
  */
-private val LTR_RUN = Regex(
-    "(https?://|www\\.)\\S+" +                                  // links
-        "|\\b(?:t\\.me|bit\\.ly|b2n\\.ir|yun\\.ir|zarinp\\.al)\\S*" +  // shortlinks
-        "|[a-zA-Z0-9-]+\\.(?:ir|com|net|org)\\S*" +                  // bare domains
-        "|[A-Za-z0-9@._:/-]*[0-9][A-Za-z0-9@._:/-]*" +            // OFF50, 1,234,567, 1111-111-1111
-        "|[0-9]"                                                   // a lone digit
-)
-private fun isolateDigits(text: String): String =
-    if (isPersian(text)) LTR_RUN.replace(text) { "\u2066${it.value}\u2069" } else text
+
 
 /** true when the phone actually has more than one SIM; badge only makes sense then */
 @Composable
@@ -251,6 +243,7 @@ fun ConversationsPage(
     var selection by remember { mutableStateOf(setOf<Long>()) }
     var newMessage by remember { mutableStateOf(false) }
     var simByThread by remember { mutableStateOf(mapOf<Long, Int>()) }
+    var contactSuffixes by remember { mutableStateOf(setOf<String>()) }
     val snack = remember { SnackbarHostState() }
 
     LaunchedEffect(reload) {
@@ -262,6 +255,7 @@ fun ConversationsPage(
             ThreadFlags.archived(ctx) + ThreadFlags.locallyArchived(ctx)
         }
         simByThread = loaded.associate { it.id to it.simId }
+        contactSuffixes = withContext(Dispatchers.IO) { Contacts.suffixes(ctx) }
         names = withContext(Dispatchers.IO) {
             val bySuffix = Contacts.namesFor(ctx)
             loaded.associate { it.address to bySuffix[Contacts.suffixOf(it.address)] }
@@ -273,8 +267,10 @@ fun ConversationsPage(
         InboxPolicy.visible(threads.map { it.toRow() }, archived, archivedMode, query, names),
         pinned
     )
-    val tabCounts = InboxPolicy.counts(ordered)
-    val shown = ordered.filter { InboxPolicy.inTab(it, tab) }
+    val tabCounts = InboxPolicy.counts(ordered, contactSuffixes)
+    val shown = ordered.filter {
+        InboxPolicy.inTab(it, tab, InboxPolicy.suffix(it.address) in contactSuffixes)
+    }
 
     fun archiveThreads(ids: Set<Long>) = scope.launch {
         val target = !archivedMode
@@ -563,7 +559,7 @@ private fun RecipientPicker(onPick: (String) -> Unit, onDismiss: () -> Unit) {
 
 /** MIUI search field: filled surface, small radius, no border */
 @Composable
-private fun SearchPill(
+internal fun SearchPill(
     query: String,
     onChange: (String) -> Unit,
     placeholder: String = "Search messages"
@@ -692,7 +688,7 @@ private fun ConversationRow(
             val snippet = row.snippet.replace('\n', ' ').trim()
             val farsi = isPersian(snippet)
             Text(
-                if (farsi) isolateDigits(snippet) else snippet,
+                if (farsi) InboxPolicy.forDisplay(snippet) else snippet,
                 fontSize = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 // base direction must be RTL for Persian, otherwise every Latin digit run
@@ -706,9 +702,6 @@ private fun ConversationRow(
             if (multiSim() && simId >= 0) {
                 Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                     SimBadge(simId)
-                    Text("SIM ${simLabel(simId) ?: ""}", fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 4.dp))
                 }
             }
         }
@@ -738,7 +731,7 @@ private fun ConversationRow(
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
+fun ThreadPage(threadId: Long, address: String, learned: Learned? = null, onBack: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val prefs = remember { ctx.getSharedPreferences("drafts", 0) }
@@ -865,6 +858,20 @@ fun ThreadPage(threadId: Long, address: String, onBack: () -> Unit) {
                         if (resolvedId > 0) ThreadFlags.toggleMute(ctx, resolvedId)
                         muted = !muted
                     })
+                    DropdownMenuItem(text = { Text("This is advertising") },
+                        leadingIcon = { Icon(Icons.Filled.Warning, null, modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        onClick = {
+                            menuOpen = false
+                            val sample = messages.lastOrNull { it.incoming }?.body.orEmpty()
+                            if (sample.isNotBlank()) learned?.markAd(address, sample)
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    if (resolvedId > 0) ThreadFlags.setArchived(ctx, resolvedId, true)
+                                }
+                                onBack()
+                            }
+                        })
                     DropdownMenuItem(text = { Text(if (blocked) "Unblock sender" else "Block sender") },
                         leadingIcon = { Icon(Icons.Filled.Warning, null, modifier = Modifier.size(20.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant) },
@@ -1178,7 +1185,7 @@ private fun Bubble(
                 Column(Modifier.padding(horizontal = 19.dp, vertical = 14.dp)) {
                     val farsi = isPersian(m.body)
                     Text(
-                        if (farsi) isolateDigits(m.body) else m.body,
+                        if (farsi) InboxPolicy.forDisplay(m.body) else m.body,
                         color = fg,
                         fontSize = 17.sp,
                         lineHeight = 19.sp,

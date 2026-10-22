@@ -5,6 +5,7 @@ import ir.smsfilter.core.Notify
 import ir.smsfilter.core.Tab
 import ir.smsfilter.core.ThreadRow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -96,6 +97,19 @@ class InboxPolicyTest {
         // nothing pinned or everything deleted: no banner
         assertNull(InboxPolicy.pinnedBanner(emptySet(), listOf(3, 7)))
         assertNull(InboxPolicy.pinnedBanner(setOf(4), listOf(3, 7)))
+    }
+
+    @Test
+    fun displayTextStripsSenderBidiMarksAndIsolatesLtrRuns() {
+        // the real Saman Bank body: it embeds LRE/PDF around the card number
+        val raw = "بانك سامان\nبرداشت مبلغ 1,234,567 انتقال وجه\nاز \u202A1111-111-1111111-1\u202C"
+        val out = InboxPolicy.forDisplay(raw)
+
+        assertFalse(out.any { it == '\u061C' || it in '\u200E'..'\u200F' || it in '\u202A'..'\u202E' })
+        assertTrue(out.contains("\u20661,234,567\u2069"))
+        assertTrue(out.contains("\u20661111-111-1111111-1\u2069"))
+        // pure latin text is left alone
+        assertEquals("plain 123", InboxPolicy.forDisplay("plain 123"))
     }
 
     @Test

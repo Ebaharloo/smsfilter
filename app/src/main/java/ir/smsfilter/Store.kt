@@ -63,6 +63,12 @@ class Store(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 3) {
     fun relabel(id: Long, label: Label) = writableDatabase
         .execSQL("UPDATE msg SET label=?, manual=1 WHERE id=?", arrayOf(label.name, id))
 
+    fun delete(id: Long) =
+        writableDatabase.delete("msg", "id=?", arrayOf(id.toString()))
+
+    fun deleteAll(label: Label) =
+        writableDatabase.delete("msg", "label=?", arrayOf(label.name))
+
     fun counts(): Map<Label, Int> = Label.entries.associateWith { l ->
         readableDatabase.rawQuery("SELECT COUNT(*) FROM msg WHERE label=?", arrayOf(l.name)).use {
             if (it.moveToFirst()) it.getInt(0) else 0

@@ -4,3 +4,6 @@ local.properties
 shots/
 *.iml
 data/
+__pycache__/
+*.pyc
+.kotlin/
