@@ -38,4 +38,26 @@ object Contacts {
     }
 
     fun suffixOf(number: String): String? = digits(number).takeLast(9).takeIf { it.length == 9 }
+
+    /** contact photo uri for a number, or null when there is none */
+    fun photoFor(ctx: Context, address: String): android.net.Uri? = try {
+        val uri = android.net.Uri.withAppendedPath(
+            ContactsContract.PhoneLookup.CONTENT_FILTER_URI, android.net.Uri.encode(address)
+        )
+        ctx.contentResolver.query(uri, arrayOf(ContactsContract.PhoneLookup.PHOTO_URI), null, null, null)
+            ?.use { c -> if (c.moveToFirst()) c.getString(0)?.let { android.net.Uri.parse(it) } else null }
+    } catch (t: Throwable) {
+        null
+    }
+
+    /** contact display name for a number, or null when unknown */
+    fun nameFor(ctx: Context, address: String): String? = try {
+        val uri = android.net.Uri.withAppendedPath(
+            ContactsContract.PhoneLookup.CONTENT_FILTER_URI, android.net.Uri.encode(address)
+        )
+        ctx.contentResolver.query(uri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)
+            ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+    } catch (t: Throwable) {
+        null
+    }
 }

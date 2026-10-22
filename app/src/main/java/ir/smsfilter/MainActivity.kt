@@ -1,9 +1,9 @@
 package ir.smsfilter
 
 import android.Manifest
+import android.app.role.RoleManager
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.Button
 import androidx.compose.material3.Divider
@@ -27,6 +28,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -35,8 +37,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -53,6 +53,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
@@ -69,16 +71,20 @@ class MainActivity : ComponentActivity() {
         val store = Store(this)
         val learned = Learned(this)
         val clf = Classifier(RuleSet.load(this), Model.fromAssets(this), learned)
-        setContent { App(store, clf, learned) }
+        val openAddress = intent?.getStringExtra("address")
+        setContent { App(store, clf, learned, openAddress) }
     }
 }
 
 private val fmt = SimpleDateFormat("dd/MM HH:mm", Locale.US)
 private const val PREFS = "smsfilter"
-private const val KEY_THEME = "theme"   // auto | light | dark
+private const val KEY_THEME = "theme"
+private const val KEY_FONT = "font_scale"
 
 enum class Page(val title: String) {
-    Messages("Messages"),
+    Inbox("Inbox"),
+    Archived("Archived"),
+    Ads("Ads"),
     Test("Test a message"),
     Appearance("Appearance"),
     Settings("Settings")
@@ -86,11 +92,20 @@ enum class Page(val title: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun App(store: Store, clf: Classifier, learned: Learned) {
+fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = null) {
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences(PREFS, 0) }
     var theme by remember { mutableStateOf(prefs.getString(KEY_THEME, "auto") ?: "auto") }
-    var page by remember { mutableStateOf(Page.Messages) }
+    var fontScale by remember { mutableStateOf(prefs.getFloat(KEY_FONT, 1.15f)) }
+    var page by remember { mutableStateOf(if (openAddress != null) Page.Inbox else Page.Inbox) }
+    var thread by remember { mutableStateOf<Pair<Long, String>?>(null) }  // threadId to address
+    // opened from a notification: jump straight into that conversation
+    LaunchedEffect(openAddress) {
+        if (openAddress != null) {
+            val id = withContext(Dispatchers.IO) { Sms.threadIdFor(ctx, openAddress) }
+            if (id != null) thread = id to openAddress
+        }
+    }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
@@ -103,157 +118,130 @@ fun App(store: Store, clf: Classifier, learned: Learned) {
         else -> systemDark
     }
 
+    val base = LocalDensity.current
     MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
+      CompositionLocalProvider(LocalDensity provides Density(base.density, fontScale)) {
         ModalNavigationDrawer(
             drawerState = drawer,
             drawerContent = {
                 ModalDrawerSheet {
-                    Text(
-                        "SMS Filter",
-                        style = MaterialTheme.typography.titleLarge,
-                        modifier = Modifier.padding(20.dp)
-                    )
+                    Text("SMS Filter", style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.padding(20.dp))
                     Page.entries.forEach { p ->
                         NavigationDrawerItem(
                             label = { Text(p.title) },
                             selected = page == p,
                             onClick = {
                                 page = p
+                                if (p == Page.Inbox && thread != null) { /* keep thread */ }
                                 scope.launch { drawer.close() }
                             },
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
                         )
                     }
                     Divider(Modifier.padding(vertical = 8.dp))
-                    Text(
-                        "v0.1 · offline · on-device",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
-                    )
+                    Text("v0.2 · offline · on-device", style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
                 }
             }
         ) {
             Scaffold(
                 topBar = {
-                    TopAppBar(
-                        title = { Text(page.title) },
-                        navigationIcon = {
-                            IconButton(onClick = { scope.launch { drawer.open() } }) {
-                                Icon(Icons.Filled.Menu, contentDescription = "menu")
+                    if (page == Page.Inbox && thread != null) {
+                        // the thread screen draws its own header (avatar, name, back)
+                    } else {
+                        TopAppBar(
+                            title = { Text(page.title) },
+                            navigationIcon = {
+                                IconButton(onClick = { scope.launch { drawer.open() } }) {
+                                    Icon(Icons.Filled.Menu, contentDescription = "menu")
+                                }
                             }
-                        }
-                    )
+                        )
+                    }
                 }
             ) { pad ->
                 Surface(Modifier.fillMaxSize().padding(pad), color = MaterialTheme.colorScheme.background) {
                     when (page) {
-                        Page.Messages -> MessagesPage(store, clf, learned)
-                        Page.Test -> TestPage(clf)
-                        Page.Appearance -> AppearancePage(theme) { picked ->
-                            theme = picked
-                            prefs.edit().putString(KEY_THEME, picked).apply()
+                        Page.Inbox -> {
+                            val open = thread
+                            if (open == null) ConversationsPage(
+                                onOpenThread = { id, addr -> thread = id to addr }
+                            )
+                            else ThreadPage(open.first, open.second) { thread = null }
                         }
+                        Page.Archived -> ConversationsPage(
+                            onOpenThread = { id, addr -> thread = id to addr },
+                            archivedMode = true
+                        )
+                        Page.Ads -> AdsPage(store, learned)
+                        Page.Test -> TestPage(clf)
+                        Page.Appearance -> AppearancePage(
+                            theme = theme,
+                            fontScale = fontScale,
+                            onTheme = { picked ->
+                                theme = picked
+                                prefs.edit().putString(KEY_THEME, picked).apply()
+                            },
+                            onFont = { picked ->
+                                fontScale = picked
+                                prefs.edit().putFloat(KEY_FONT, picked).apply()
+                            }
+                        )
                         Page.Settings -> SettingsPage()
                     }
                 }
             }
         }
+      }
     }
 }
 
+/** the filtered ads, kept out of the inbox entirely */
 @Composable
-fun MessagesPage(store: Store, clf: Classifier, learned: Learned) {
-    val ctx = LocalContext.current
+fun AdsPage(store: Store, learned: Learned) {
     val scope = rememberCoroutineScope()
-    var tab by remember { mutableStateOf(1) }
     var rows by remember { mutableStateOf(listOf<Msg>()) }
     var counts by remember { mutableStateOf(mapOf<Label, Int>()) }
-    var scanning by remember { mutableStateOf(false) }
-    var scanInfo by remember { mutableStateOf("") }
 
     fun refresh() = scope.launch {
         withContext(Dispatchers.IO) {
-            rows = store.list(if (tab == 2) null else if (tab == 0) Label.SPAM else Label.IMPORTANT)
+            rows = store.list(Label.SPAM)
             counts = store.counts()
         }
     }
-    LaunchedEffect(tab) { refresh() }
+    LaunchedEffect(Unit) { refresh() }
 
     Column(Modifier.fillMaxSize().padding(12.dp)) {
         Text(
-            "filtered ${counts[Label.SPAM] ?: 0} · kept ${counts[Label.IMPORTANT] ?: 0} · unsure ${counts[Label.UNSURE] ?: 0}",
+            "ads ${counts[Label.SPAM] ?: 0} · kept ${counts[Label.IMPORTANT] ?: 0} · unsure ${counts[Label.UNSURE] ?: 0}",
             style = MaterialTheme.typography.bodySmall
         )
-        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(enabled = !scanning, onClick = {
-                scanning = true
-                scanInfo = "scanning inbox…"
-                scope.launch {
-                    val n = withContext(Dispatchers.IO) {
-                        val contacts = Contacts.suffixes(ctx)
-                        val sms = SmsReader.scan(ctx, 1000)
-                        var spam = 0
-                        for (s in sms) {
-                            val v = clf.classify(s.body, s.address, contacts)
-                            if (v.label == Label.SPAM) spam++
-                            store.add(s.address, s.body, v, s.date)      // copy first, always
-                            store.updateVerdict(s.date, s.body, v)       // never touches your own labels
-                        }
-                        "${sms.size} messages · $spam ads · ${contacts.size} contacts allowed"
-                    }
-                    scanInfo = n
-                    scanning = false
-                    refresh()
-                }
-            }) { Text(if (scanning) "Scanning…" else "Scan inbox") }
-            if (scanInfo.isNotEmpty()) Text(
-                scanInfo, style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(top = 14.dp)
-            )
-        }
-
-        TabRow(selectedTabIndex = tab) {
-            listOf("Quarantine", "Kept", "All").forEachIndexed { i, name ->
-                Tab(tab == i, onClick = { tab = i }, text = { Text(name) })
+        if (rows.isEmpty()) {
+            Text("Nothing filtered yet — tap «تبلیغ» on a message to teach the filter.",
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(vertical = 12.dp))
+        } else {
+            LazyColumn(Modifier.weight(1f)) {
+                items(rows, key = { it.id }) { m -> AdRow(m, store, learned, ::refresh) }
             }
-        }
-
-        LazyColumn(Modifier.weight(1f)) {
-            items(rows, key = { it.id }) { m -> MessageRow(m, store, learned, ::refresh) }
         }
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageRow(m: Msg, store: Store, learned: Learned, refresh: () -> Unit) {
-    val ctx = LocalContext.current
+private fun AdRow(m: Msg, store: Store, learned: Learned, refresh: () -> Unit) {
     val scope = rememberCoroutineScope()
-    Column(
-        Modifier.fillMaxWidth().padding(vertical = 6.dp).combinedClickable(
-            onClick = {                                   // open the real conversation
-                val target = Contacts.digits(m.sender)
-                if (target.isNotEmpty()) {
-                    try {
-                        ctx.startActivity(Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$target")))
-                    } catch (t: Throwable) {
-                        // no SMS app handles smsto: stay here
-                    }
-                }
-            },
-            onLongClick = {}
-        )
-    ) {
-        // meta and score stay LTR: mixing an LTR run into RTL text scrambles both
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp).combinedClickable(
+        onClick = {}, onLongClick = {}
+    )) {
         Text("${m.sender}  ${fmt.format(Date(m.ts))}", style = MaterialTheme.typography.labelSmall)
         CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
             Text(m.text, style = MaterialTheme.typography.bodyMedium)
         }
-        Text(
-            "${m.label} ${m.score} · ${m.why.take(90)}",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        Text("SPAM ${m.score} · ${m.why.take(80)}", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
             Row {
                 TextButton(onClick = {
@@ -261,20 +249,19 @@ private fun MessageRow(m: Msg, store: Store, learned: Learned, refresh: () -> Un
                         withContext(Dispatchers.IO) {
                             store.relabel(m.id, Label.IMPORTANT)
                             learned.markImportant(m.sender)
+                            // put it back into the real inbox
+                            Sms.insertInbox(LocalContextHolder.ctx!!, m.sender, m.text, m.ts)
                         }; refresh()
                     }
                 }) { Text("این مهم است") }
-                TextButton(onClick = {
-                    scope.launch {
-                        withContext(Dispatchers.IO) {
-                            store.relabel(m.id, Label.SPAM)
-                            learned.markAd(m.sender, m.text)
-                        }; refresh()
-                    }
-                }) { Text("تبلیغ") }
             }
         }
     }
+}
+
+/** tiny holder so AdRow can reach a Context without threading it through every call */
+object LocalContextHolder {
+    var ctx: android.content.Context? = null
 }
 
 @Composable
@@ -294,17 +281,36 @@ fun TestPage(clf: Classifier) {
             Text(v.label.name, style = MaterialTheme.typography.titleMedium)
             Text("score ${v.score}", style = MaterialTheme.typography.bodySmall)
             Text("why: ${v.why.joinToString(", ")}", style = MaterialTheme.typography.bodySmall)
-            if (v.norm.isNotBlank()) {
-                Text("normalized: ${v.norm.take(300)}", style = MaterialTheme.typography.labelSmall)
-            }
+            if (v.norm.isNotBlank()) Text("normalized: ${v.norm.take(300)}",
+                style = MaterialTheme.typography.labelSmall)
         }
     }
 }
 
 @Composable
-fun AppearancePage(theme: String, onTheme: (String) -> Unit) {
-    Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Theme", style = MaterialTheme.typography.titleMedium)
+fun AppearancePage(
+    theme: String,
+    fontScale: Float,
+    onTheme: (String) -> Unit,
+    onFont: (Float) -> Unit
+) {
+    Column(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Text size", style = MaterialTheme.typography.titleMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf(1.0f to "Small", 1.15f to "Normal", 1.35f to "Large", 1.55f to "Extra large")
+                .forEach { (value, label) ->
+                    FilterChip(
+                        selected = kotlin.math.abs(fontScale - value) < 0.01f,
+                        onClick = { onFont(value) },
+                        label = { Text(label) }
+                    )
+                }
+        }
+        Text("Applies to the whole app, including Persian text in messages.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        Text("Theme", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             listOf("auto" to "Auto", "light" to "Light", "dark" to "Dark").forEach { (key, label) ->
                 FilterChip(selected = theme == key, onClick = { onTheme(key) }, label = { Text(label) })
@@ -313,16 +319,20 @@ fun AppearancePage(theme: String, onTheme: (String) -> Unit) {
         Text("Auto follows your phone's day/night setting.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Divider(Modifier.padding(vertical = 8.dp))
-        Text("Language", style = MaterialTheme.typography.titleMedium)
-        Text("Interface is English, message text stays Persian. Full Farsi interface: later.",
-            style = MaterialTheme.typography.bodySmall)
+
+        Text("Preview", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 8.dp))
+        ListItem(
+            headlineContent = { Text("بانک سامان") },
+            supportingContent = { Text("برداشت مبلغ ۱٬۴۰۲٬۷۵۶ ریال، مانده ۱۹۹٬۰۶۴٬۵۵۲") },
+            leadingContent = { Avatar("+98210001", 52.dp, 16) }
+        )
     }
 }
 
 @Composable
 fun SettingsPage() {
     val ctx = LocalContext.current
+    LocalContextHolder.ctx = ctx
     val nm = remember { ctx.getSystemService(android.app.NotificationManager::class.java) }
     var filterOn by remember {
         mutableStateOf(ctx.getSharedPreferences(PREFS, 0).getBoolean("filter_on", true))
@@ -334,14 +344,33 @@ fun SettingsPage() {
         PackageManager.PERMISSION_GRANTED
     val contactsOk = androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) ==
         PackageManager.PERMISSION_GRANTED
+    val roleManager = remember { ctx.getSystemService(RoleManager::class.java) }
+    val isDefaultSms = remember { roleManager?.isRoleAvailable(RoleManager.ROLE_SMS) == true &&
+        roleManager.isRoleHeld(RoleManager.ROLE_SMS) }
 
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("Filter notifications", style = MaterialTheme.typography.bodyLarge)
+            Text("Filter ads", style = MaterialTheme.typography.bodyLarge)
             Switch(checked = filterOn, onCheckedChange = {
                 filterOn = it
                 ctx.getSharedPreferences(PREFS, 0).edit().putBoolean("filter_on", it).apply()
             })
+        }
+        Divider(Modifier.padding(vertical = 6.dp))
+        Text("Your SMS app", style = MaterialTheme.typography.titleMedium)
+        Text(if (isDefaultSms) "SMS Filter is your SMS app — ads are never written to the inbox."
+             else "MIUI Messages still receives SMS. Ads are only hidden from notifications.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!isDefaultSms) {
+            Button(onClick = {
+                val roleManager = ctx.getSystemService(RoleManager::class.java)
+                if (roleManager != null && roleManager.isRoleAvailable(RoleManager.ROLE_SMS)) {
+                    (ctx as? ComponentActivity)?.startActivityForResult(
+                        roleManager.createRequestRoleIntent(RoleManager.ROLE_SMS), 1001
+                    )
+                }
+            }) { Text("Make SMS Filter my SMS app") }
         }
         Divider(Modifier.padding(vertical = 6.dp))
         Text("Permissions", style = MaterialTheme.typography.titleMedium)
@@ -350,65 +379,13 @@ fun SettingsPage() {
         Text("contacts: ${if (contactsOk) "granted" else "missing"}")
         TextButton(onClick = {
             (ctx as? ComponentActivity)?.requestPermissions(
-                arrayOf(Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS), 1
+                arrayOf(Manifest.permission.READ_SMS, Manifest.permission.READ_CONTACTS,
+                    Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS), 1
             )
-        }) { Text("Request SMS + contacts") }
+        }) { Text("Request SMS permissions") }
         TextButton(onClick = { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) {
             Text("Open notification access settings")
         }
-        Divider(Modifier.padding(vertical = 6.dp))
-        Text("Clean your SMS app (root)", style = MaterialTheme.typography.titleMedium)
-        var rootClean by remember {
-            mutableStateOf(ctx.getSharedPreferences(PREFS, 0).getBoolean("root_clean", false))
-        }
-        var rootState by remember { mutableStateOf<String?>(null) }
-        var busy by remember { mutableStateOf(false) }
-        var cleanOut by remember { mutableStateOf("") }
-        androidx.compose.runtime.LaunchedEffect(Unit) {
-            rootState = withContext(Dispatchers.IO) {
-                if (RootDbCleaner.available()) "granted" else "not granted"
-            }
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Column(Modifier.weight(1f)) {
-                Text("Allow editing the SMS database")
-                Text("Deletes ads from the real inbox so MIUI/Google Messages never shows them. " +
-                    "A copy of every deleted message stays in Quarantine, and a backup file is written first.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Switch(checked = rootClean, onCheckedChange = {
-                rootClean = it
-                ctx.getSharedPreferences(PREFS, 0).edit().putBoolean("root_clean", it).apply()
-                if (it) Thread { rootState = if (RootDbCleaner.available()) "granted" else "denied" }.start()
-            })
-        }
-        Text("root: ${rootState ?: "checking…"}", style = MaterialTheme.typography.labelSmall)
-        Button(
-            enabled = rootClean && !busy,
-            onClick = {
-                busy = true
-                cleanOut = "working…"
-                Thread {
-                    val contacts = Contacts.suffixes(ctx)
-                    val clf = Classifier(RuleSet.load(ctx), Model.fromAssets(ctx), Learned(ctx))
-                    val store = Store(ctx)
-                    val sms = SmsReader.scan(ctx, 3000)
-                    val ids = ArrayList<Long>()
-                    for (s in sms) {
-                        val v = clf.classify(s.body, s.address, contacts)
-                        store.add(s.address, s.body, v, s.date)     // copy first, always
-                        store.updateVerdict(s.date, s.body, v)
-                        if (v.label == Label.SPAM && s.id > 0) ids.add(s.id)
-                    }
-                    val r = RootDbCleaner.deleteRows(ctx, ids)
-                    cleanOut = if (r.ok) "deleted ${r.deleted} ads · backup ${r.backup?.substringAfterLast('/')}"
-                    else "not cleaned: ${r.message}"
-                    busy = false
-                }.start()
-            }
-        ) { Text(if (busy) "Cleaning…" else "Clean my SMS app now") }
-        if (cleanOut.isNotEmpty()) Text(cleanOut, style = MaterialTheme.typography.bodySmall)
         Divider(Modifier.padding(vertical = 6.dp))
         Text("Data", style = MaterialTheme.typography.titleMedium)
         Text("Everything stays on this phone. Your taps train the filter and are never uploaded.",
