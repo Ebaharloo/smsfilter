@@ -28,6 +28,25 @@ class IncomingSms : BroadcastReceiver() {
                 ctx.getSystemService(NotificationManager::class.java).cancel(intent.getIntExtra("id", 0))
                 return
             }
+            ACTION_SCAN -> {
+                // manual/scripted sweep of what is already in the inbox (adb: am broadcast -a ir.smsfilter.SCAN)
+                val pending = goAsync()
+                Thread {
+                    try {
+                        val res = InboxScan.run(
+                            ctx,
+                            Classifier(RuleSet.load(ctx), Model.fromAssets(ctx), Learned(ctx)),
+                            Store(ctx)
+                        )
+                        android.util.Log.i("SMSFilter", "scan done $res")
+                    } catch (t: Throwable) {
+                        android.util.Log.e("SMSFilter", "scan failed", t)
+                    } finally {
+                        pending.finish()
+                    }
+                }.start()
+                return
+            }
             Telephony.Sms.Intents.SMS_DELIVER_ACTION -> Unit
             else -> return
         }
@@ -173,6 +192,7 @@ class IncomingSms : BroadcastReceiver() {
         const val NOTIF_ID = 2000
         const val ADS_ID = 2001
         const val KEY_REPLY = "reply_text"
+        const val ACTION_SCAN = "ir.smsfilter.SCAN"
         const val ACTION_REPLY = "ir.smsfilter.REPLY"
         const val ACTION_MARK_READ = "ir.smsfilter.MARK_READ"
         const val ACTION_COPY_OTP = "ir.smsfilter.COPY_OTP"

@@ -12,6 +12,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -72,6 +75,8 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
@@ -87,8 +92,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
@@ -96,6 +104,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -112,6 +121,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 private val clock = SimpleDateFormat("HH:mm", Locale.US)
 private val dayFmt = SimpleDateFormat("dd MMM", Locale.US)
@@ -228,7 +238,9 @@ private fun simLabel(simId: Int): String? {
 @Composable
 fun ConversationsPage(
     onOpenThread: (Long, String) -> Unit,
-    archivedMode: Boolean = false
+    archivedMode: Boolean = false,
+    learned: Learned? = null,
+    store: Store? = null
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -289,6 +301,30 @@ fun ConversationsPage(
         }
     }
 
+    // heavy swipe: the user says this is an ad, so teach the model and get it out of the inbox
+    fun filterThread(row: ThreadRow) = scope.launch {
+        withContext(Dispatchers.IO) {
+            if (row.snippet.isNotBlank()) learned?.markAd(row.address, row.snippet)
+            store?.add(row.address, row.snippet, Verdict(Label.SPAM, 99, listOf("user:ad"), row.snippet), row.date)
+            ThreadFlags.setArchived(ctx, row.id, true)
+            Sms.markThreadRead(ctx, row.id)
+        }
+        reload++
+        snack.showSnackbar("Marked as ad — the filter learned from it")
+    }
+
+    fun toggleRead(row: ThreadRow) = scope.launch {
+        withContext(Dispatchers.IO) {
+            val cv = ContentValues()
+            cv.put(Telephony.Sms.READ, if (row.unread > 0) 1 else 0)
+            ctx.contentResolver.update(
+                Telephony.Sms.CONTENT_URI, cv,
+                "${Telephony.Sms.THREAD_ID}=?", arrayOf(row.id.toString())
+            )
+        }
+        reload++
+    }
+
     fun deleteThreads(ids: Set<Long>) = scope.launch {
         withContext(Dispatchers.IO) { ids.forEach { Sms.deleteThread(ctx, it) } }
         selection = emptySet()
@@ -322,22 +358,28 @@ fun ConversationsPage(
                 }
             } else {
                 SearchPill(query, { query = it })
-                // MIUI-style tabs: ads and bank/code traffic separated from people
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                        .padding(start = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                // scrollable tab bar: full names, underline indicator, no chip styling
+                ScrollableTabRow(
+                    selectedTabIndex = Tab.entries.indexOf(tab),
+                    edgePadding = 0.dp,
+                    containerColor = MaterialTheme.colorScheme.background,
+                    contentColor = MaterialTheme.colorScheme.primary
                 ) {
                     Tab.entries.forEach { t ->
                         val n = tabCounts[t] ?: 0
-                        FilterChip(
+                        Tab(
                             selected = tab == t,
                             onClick = { tab = t },
-                            label = { Text("${t.label} $n", fontSize = 13.sp) }
+                            text = {
+                                Text(
+                                    "${t.label} $n",
+                                    fontSize = 14.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         )
                     }
-                    // keeps the last chip fully visible when the row is scrolled to the end
-                    Spacer(Modifier.width(12.dp))
                 }
             }
 
@@ -381,20 +423,12 @@ fun ConversationsPage(
                                 selection = if (selected) selection - row.id else selection + row.id
                             },
                             simId = simByThread[row.id] ?: -1,
-                            onArchive = { archiveThreads(setOf(row.id)) },
-                            onToggleRead = {
-                                scope.launch {
-                                    withContext(Dispatchers.IO) {
-                                        val cv = ContentValues()
-                                        cv.put(Telephony.Sms.READ, if (row.unread > 0) 1 else 0)
-                                        ctx.contentResolver.update(
-                                            Telephony.Sms.CONTENT_URI, cv,
-                                            "${Telephony.Sms.THREAD_ID}=?", arrayOf(row.id.toString())
-                                        )
-                                    }
-                                    reload++
-                                }
-                            }
+                            rightLabel = "Read",
+                            leftLabel = if (archivedMode) "Inbox" else "Archive",
+                            heavyLabel = "Filter ad",
+                            onRight = { toggleRead(row) },
+                            onLeft = { archiveThreads(setOf(row.id)) },
+                            onHeavy = { filterThread(row) }
                         )
                     }
                 }
@@ -593,7 +627,13 @@ internal fun SearchPill(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+/**
+ * Three-stage swipe, the way the user asked for it:
+ *   drag right  -> secondary action (read / restore)
+ *   drag left   -> primary action (archive / inbox)
+ *   drag left past 60% of the row -> heavy action (filter the ad / delete)
+ * Directions are physical (raw drag sign), so a Persian RTL layout cannot flip them.
+ */
 @Composable
 private fun SwipeRow(
     row: ThreadRow,
@@ -605,41 +645,82 @@ private fun SwipeRow(
     simId: Int,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    onArchive: () -> Unit,
-    onToggleRead: () -> Unit
+    rightLabel: String,
+    leftLabel: String,
+    heavyLabel: String,
+    onRight: () -> Unit,
+    onLeft: () -> Unit,
+    onHeavy: () -> Unit
 ) {
-    // SwipeToDismissBox directions are layout-direction aware: in a Persian (RTL) layout the
-    // physical left swipe arrives as StartToEnd, which used to run "mark read" instead of archive.
-    val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-    val archiveDir = if (rtl) SwipeToDismissBoxValue.StartToEnd else SwipeToDismissBoxValue.EndToStart
-    val readDir = if (rtl) SwipeToDismissBoxValue.EndToStart else SwipeToDismissBoxValue.StartToEnd
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            when (value) {
-                archiveDir -> onArchive()
-                readDir -> onToggleRead()
-                else -> Unit
-            }
-            false   // the list reloads from the provider; never leave a hole in the UI
-        }
-    )
-    SwipeToDismissBox(
-        state = dismissState,
-        enableDismissFromStartToEnd = !selectionMode,
-        enableDismissFromEndToStart = !selectionMode,
-        backgroundContent = {
-            val archive = dismissState.dismissDirection == archiveDir
-            Box(
-                Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant)
-                    .padding(horizontal = 20.dp),
-                contentAlignment = if (dismissState.dismissDirection == archiveDir) Alignment.CenterEnd
-                else Alignment.CenterStart
-            ) { Text(if (archive) "Archive" else "Read", style = MaterialTheme.typography.labelLarge) }
-        }
+    val density = LocalDensity.current
+    var widthPx by remember { mutableStateOf(1f) }
+    var dx by remember { mutableStateOf(0f) }
+    val trigger = with(density) { 72.dp.toPx() }
+    val heavyTrigger = widthPx * 0.6f
+    val heavy = dx < -heavyTrigger
+
+    Box(
+        Modifier.fillMaxWidth().onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
     ) {
-        ConversationRow(row, name, pinned, muted, selected, selectionMode, simId, onClick, onLongClick)
+        if (dx != 0f) {
+            val paint = if (dx > 0) MaterialTheme.colorScheme.secondaryContainer
+            else if (heavy) MaterialTheme.colorScheme.errorContainer
+            else MaterialTheme.colorScheme.surfaceVariant
+            val label = when {
+                dx > 0 -> rightLabel
+                heavy -> heavyLabel
+                else -> leftLabel
+            }
+            Box(
+                Modifier.matchParentSize().background(paint).padding(horizontal = 24.dp),
+                contentAlignment = if (dx > 0) Alignment.CenterStart else Alignment.CenterEnd
+            ) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (heavy) MaterialTheme.colorScheme.onErrorContainer
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Box(
+            Modifier.offset { IntOffset(dx.roundToInt(), 0) }
+                .pointerInput(selectionMode) {
+                    if (selectionMode) return@pointerInput
+                    // thresholds come from the real pointer size inside this scope; values captured
+                    // from composition were stale (width is still 1px on the first layout pass)
+                    val width = size.width.toFloat().coerceAtLeast(1f)
+                    val triggerPx = 72.dp.toPx()
+                    val heavyPx = width * 0.6f
+                    var acc = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = { acc = 0f },
+                        onDragEnd = {
+                            when {
+                                acc <= -heavyPx -> onHeavy()
+                                acc <= -triggerPx -> onLeft()
+                                acc >= triggerPx -> onRight()
+                            }
+                            dx = 0f
+                            acc = 0f
+                        },
+                        onDragCancel = { dx = 0f; acc = 0f },
+                        onHorizontalDrag = { _, delta ->
+                            acc += delta
+                            dx = acc.coerceIn(-width * 0.85f, width * 0.85f)
+                        }
+                    )
+                }
+                .pointerInput(selectionMode) {
+                    // the row itself is the tap target: a clickable child would swallow the drag
+                    detectTapGestures(onTap = { onClick() }, onLongPress = { onLongClick() })
+                }
+        ) {
+            ConversationRow(row, name, pinned, muted, selected, selectionMode, simId)
+        }
     }
 }
+
 
 /** MIUI row: 56dp avatar, 16sp title, 15sp preview, dot + 18dp badge, no divider */
 @OptIn(ExperimentalFoundationApi::class)
@@ -651,9 +732,7 @@ private fun ConversationRow(
     muted: Boolean,
     selected: Boolean,
     selectionMode: Boolean,
-    simId: Int,
-    onClick: () -> Unit,
-    onLongClick: () -> Unit
+    simId: Int
 ) {
     Row(
         Modifier.fillMaxWidth().heightIn(min = 92.dp)
@@ -661,11 +740,10 @@ private fun ConversationRow(
                 if (selected) MaterialTheme.colorScheme.secondaryContainer
                 else MaterialTheme.colorScheme.background
             )
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(start = 16.dp, end = 20.dp, top = 14.dp, bottom = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (selectionMode) Checkbox(checked = selected, onCheckedChange = { onClick() })
+        if (selectionMode) Checkbox(checked = selected, onCheckedChange = null)
         Avatar(row.address, 40.dp, 14, neutral = true)
         Column(Modifier.weight(1f).padding(start = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1089,6 +1167,20 @@ fun ThreadPage(threadId: Long, address: String, learned: Learned? = null, onBack
                 )
                 Divider(color = MaterialTheme.colorScheme.surfaceVariant)
                 SheetAction("Copy") { copy(ctx, m.body); selected = null }
+                SheetAction("This is an ad") {
+                    // teach the model, keep our copy, remove the ad from the inbox
+                    learned?.markAd(address, m.body)
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            val verdict = Verdict(Label.SPAM, 99, listOf("user:ad"), m.body)
+                            Store(ctx).add(address, m.body, verdict, m.date)
+                            Sms.deleteMessage(ctx, m.id)
+                            if (resolvedId > 0) ThreadFlags.setArchived(ctx, resolvedId, true)
+                        }
+                        selected = null
+                        onBack()
+                    }
+                }
                 SheetAction(
                     if (m.id in pins) "Unpin message" else "Pin message",
                     icon = { Icon(Icons.Filled.Star, null, modifier = Modifier.size(20.dp),

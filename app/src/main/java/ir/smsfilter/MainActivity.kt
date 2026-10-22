@@ -9,7 +9,9 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -64,11 +67,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ir.smsfilter.core.InboxPolicy
@@ -78,6 +85,7 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /** MIUI Messages palette: true-black dark theme, blue accent, grey text. */
 private fun miuiDark() = darkColorScheme(
@@ -191,8 +199,8 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
         ) {
             Scaffold(
                 topBar = {
-                    if (page == Page.Inbox && thread != null) {
-                        // the thread screen draws its own header (avatar, name, back)
+                    if ((page == Page.Inbox && thread != null) || page == Page.Ads) {
+                        // these screens draw their own header (back arrow, title, menu)
                     } else {
                         TopAppBar(
                             title = { Text(page.title) },
@@ -210,13 +218,17 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
                         Page.Inbox -> {
                             val open = thread
                             if (open == null) ConversationsPage(
-                                onOpenThread = { id, addr -> thread = id to addr }
+                                onOpenThread = { id, addr -> thread = id to addr },
+                                learned = learned,
+                                store = store
                             )
                             else ThreadPage(open.first, open.second, learned) { thread = null }
                         }
                         Page.Archived -> ConversationsPage(
                             onOpenThread = { id, addr -> thread = id to addr },
-                            archivedMode = true
+                            archivedMode = true,
+                            learned = learned,
+                            store = store
                         )
                         Page.Ads -> AdsPage(store, learned) { page = Page.Inbox }
                         Page.Blocked -> BlockedPage()
@@ -239,6 +251,73 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
             }
         }
       }
+    }
+}
+
+/** same three-stage swipe as the inbox: right = restore, left = block, far left = delete */
+@Composable
+private fun AdSwipeRow(
+    onRight: () -> Unit,
+    onLeft: () -> Unit,
+    onHeavy: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    val density = LocalDensity.current
+    var widthPx by remember { mutableStateOf(1f) }
+    var dx by remember { mutableStateOf(0f) }
+    val trigger = with(density) { 72.dp.toPx() }
+    val heavyTrigger = widthPx * 0.6f
+    val heavy = dx < -heavyTrigger
+    Box(Modifier.fillMaxWidth().onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }) {
+        if (dx != 0f) {
+            val paint = when {
+                dx > 0 -> MaterialTheme.colorScheme.secondaryContainer
+                heavy -> MaterialTheme.colorScheme.errorContainer
+                else -> MaterialTheme.colorScheme.surfaceVariant
+            }
+            Box(
+                Modifier.matchParentSize().background(paint).padding(horizontal = 24.dp),
+                contentAlignment = if (dx > 0) androidx.compose.ui.Alignment.CenterStart
+                else androidx.compose.ui.Alignment.CenterEnd
+            ) {
+                Text(
+                    when {
+                        dx > 0 -> "Restore"
+                        heavy -> "Delete"
+                        else -> "Block"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (heavy) MaterialTheme.colorScheme.onErrorContainer
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Box(
+            Modifier.offset { IntOffset(dx.roundToInt(), 0) }
+                .pointerInput(Unit) {
+                    val width = size.width.toFloat().coerceAtLeast(1f)
+                    val triggerPx = 72.dp.toPx()
+                    val heavyPx = width * 0.6f
+                    var acc = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = { acc = 0f },
+                        onDragEnd = {
+                            when {
+                                acc <= -heavyPx -> onHeavy()
+                                acc <= -triggerPx -> onLeft()
+                                acc >= triggerPx -> onRight()
+                            }
+                            dx = 0f
+                            acc = 0f
+                        },
+                        onDragCancel = { dx = 0f; acc = 0f },
+                        onHorizontalDrag = { _, delta ->
+                            acc += delta
+                            dx = acc.coerceIn(-width * 0.85f, width * 0.85f)
+                        }
+                    )
+                }
+        ) { content() }
     }
 }
 
@@ -290,6 +369,25 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                         Icon(Icons.Filled.MoreVert, contentDescription = "options")
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Scan inbox for ads") },
+                            onClick = {
+                                menuOpen = false
+                                scope.launch {
+                                    val result = withContext(Dispatchers.IO) {
+                                        InboxScan.run(
+                                            ctx,
+                                            Classifier(RuleSet.load(ctx), Model.fromAssets(ctx), learned),
+                                            store
+                                        )
+                                    }
+                                    refresh()
+                                    snack.showSnackbar(
+                                        "scanned ${result.scanned} · moved ${result.spam} ads out of ${result.threads} conversations"
+                                    )
+                                }
+                            }
+                        )
                         DropdownMenuItem(text = { Text("Delete all ads") },
                             onClick = { menuOpen = false; confirmClear = true })
                     }
@@ -314,6 +412,30 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
             } else {
                 LazyColumn(Modifier.fillMaxSize()) {
                     items(shown, key = { it.id }) { m ->
+                        AdSwipeRow(
+                            onRight = {
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        store.relabel(m.id, Label.IMPORTANT)
+                                        learned.markImportant(m.sender)
+                                        Sms.insertInbox(ctx, m.sender, m.text, m.ts)
+                                    }
+                                    refresh()
+                                    snack.showSnackbar("Restored to inbox")
+                                }
+                            },
+                            onLeft = {
+                                Blocked.add(ctx, m.sender)
+                                scope.launch { snack.showSnackbar("${Contacts.displayName(m.sender)} blocked") }
+                            },
+                            onHeavy = {
+                                scope.launch {
+                                    withContext(Dispatchers.IO) { store.delete(m.id) }
+                                    refresh()
+                                    snack.showSnackbar("Ad deleted")
+                                }
+                            }
+                        ) {
                         Row(
                             Modifier.fillMaxWidth().heightIn(min = 92.dp)
                                 .clickable { open = m }
@@ -335,6 +457,7 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                             }
                             Text(fmt.format(Date(m.ts)), fontSize = 13.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                         }
                     }
                 }
