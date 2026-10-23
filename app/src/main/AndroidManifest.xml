@@ -101,6 +101,14 @@
             </intent-filter>
         </receiver>
 
+        <!-- carrier send / delivery callbacks for messages we send -->
+        <receiver android:name=".SendStatusReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="ir.smsfilter.SENT" />
+                <action android:name="ir.smsfilter.DELIVERED" />
+            </intent-filter>
+        </receiver>
+
         <!-- notification fallback while another app is the SMS app -->
         <service
             android:name=".FilterService"

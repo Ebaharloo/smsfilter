@@ -11,7 +11,7 @@ import android.content.Context
  */
 object AdActions {
 
-    /** keep the copy, teach the words, and move the conversation (threadId 0 = look it up) */
+    /** keep the copy and teach the words; the conversation is never hidden by a flag */
     fun markAd(
         ctx: Context,
         store: Store?,
@@ -24,7 +24,16 @@ object AdActions {
         if (body.isNotBlank()) learned?.markAd(sender, body)
         store?.add(sender, body, Verdict(Label.SPAM, 99, listOf("user:ad"), body), ts)
         val tid = if (threadId > 0) threadId else Sms.threadIdFor(ctx, sender) ?: 0L
-        if (tid > 0) ThreadFlags.quarantine(ctx, tid)
+        // an earlier version flagged the thread so it vanished from Inbox AND Archive - a hidden
+        // middle place the user could not find. Ads are recorded on the Ads page instead.
+        if (tid > 0) ThreadFlags.unmarkSpam(ctx, tid)
+    }
+
+    /** "send this conversation to the Ads page": the copy is kept, the messages leave the inbox */
+    fun moveConversationToAds(ctx: Context, threadId: Long) {
+        if (threadId <= 0) return
+        ThreadFlags.unmarkSpam(ctx, threadId)
+        Sms.deleteThread(ctx, threadId)
     }
 
     /**
@@ -39,7 +48,9 @@ object AdActions {
         store.relabelCopies(m.sender, m.text, Label.IMPORTANT)
         learned.markImportant(m.sender)
         learned.allow(m.sender)
-        val rowId = Sms.insertInbox(ctx, m.sender, m.text, m.ts)
+        // -1 = unknown: a restored old ad carries no reliable subscription id, and the thread picks
+        // the newest known SIM instead of inventing one
+        val rowId = Sms.insertInbox(ctx, m.sender, m.text, m.ts, -1)
         // the row we just wrote knows its own thread; resolving by number can land on a sibling
         // thread when the same number exists under two spellings, and then the restored message
         // stays archived in the thread it actually went to

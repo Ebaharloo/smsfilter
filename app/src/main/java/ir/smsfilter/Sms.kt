@@ -59,7 +59,8 @@ object Sms {
         val body: String,
         val date: Long,
         val incoming: Boolean,
-        val simId: Int = -1          // subscription_id; -1 = unknown/single-SIM
+        val simId: Int = -1,          // subscription_id; -1 = unknown/single-SIM
+        val status: Int = 0           // Telephony.Sms.STATUS_* for the sent copy
     )
 
     fun threads(ctx: Context, limit: Int = 300, maxRows: Int = 5000): List<Thread> {
@@ -96,6 +97,12 @@ object Sms {
                             unread = 0, outgoing = type == Telephony.Sms.MESSAGE_TYPE_SENT,
                             simId = simId
                         )
+                    } else if (simId > 0) {
+                        // this app used to insert its own copies without a subscription id, so the
+                        // newest message can carry 0 while older ones know the SIM: take the newest
+                        // valid one so the row still shows which card it belongs to
+                        val cur = byThread[tid]
+                        if (cur != null && cur.simId <= 0) byThread[tid] = cur.copy(simId = simId)
                     }
                 }
             }
@@ -111,7 +118,8 @@ object Sms {
         val proj = (
             listOf(
                 Telephony.Sms._ID, Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS,
-                Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE
+                Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE,
+                Telephony.Sms.STATUS
             ) + if (simCol.isNotEmpty()) listOf(simCol) else emptyList()
         ).toTypedArray()
         // newest first and stop at the window: a bank thread can hold thousands of messages and the
@@ -129,7 +137,8 @@ object Sms {
                         body = c.getString(3).orEmpty(),
                         date = c.getLong(4),
                         incoming = c.getInt(5) == Telephony.Sms.MESSAGE_TYPE_INBOX,
-                        simId = if (simCol.isNotEmpty()) try { c.getInt(6) } catch (e: Throwable) { -1 } else -1
+                        simId = if (simCol.isNotEmpty()) try { c.getInt(7) } catch (e: Throwable) { -1 } else -1,
+                        status = try { c.getInt(6) } catch (e: Throwable) { 0 }
                     )
                 }
             }
@@ -220,11 +229,25 @@ object Sms {
         false
     }
 
-    @Volatile
-    private var simsCache: Pair<Long, List<Pair<Int, String>>>? = null
+    /**
+     * One physical SIM as the user sees it: slot, carrier, number.
+     * [label] is the slot, because that is what the tray shows - a subscription id means nothing
+     * to a person, and on this ROM two different sub ids both resolved to slot 0.
+     */
+    data class Sim(
+        val subId: Int,
+        val slot: Int,
+        val carrier: String? = null,
+        val number: String? = null
+    ) {
+        val label: String get() = if (slot >= 0) "SIM ${slot + 1}" else "SIM $subId"
+    }
 
-    /** active SIMs as (subscriptionId, label); cached - every row badge and both pickers ask for it */
-    fun sims(ctx: Context): List<Pair<Int, String>> {
+    @Volatile
+    private var simsCache: Pair<Long, List<Sim>>? = null
+
+    /** active SIMs, cached - every row badge and both pickers ask for it */
+    fun sims(ctx: Context): List<Sim> {
         val now = android.os.SystemClock.elapsedRealtime()
         simsCache?.let { if (now - it.first < 60_000) return it.second }
         val fresh = computeSims(ctx)
@@ -249,83 +272,134 @@ object Sms {
         return v
     }
 
-    /**
-     * Which SIM a message belongs to, as "1"/"2".
-     * SubscriptionManager is locked down on MIUI (activeSubscriptionInfoList returns 0 even for the
-     * default SMS app), so the label falls back to the slot index and then to the raw sub id.
-     */
-    fun simLabel(ctx: Context, simId: Int): String? {
-        if (simId < 0) return null
-        if (!multiSim(ctx) && simId <= 1) return null
-        val subs = sims(ctx)
-        val bySub = subs.indexOfFirst { it.first == simId }
-        val slot = if (bySub >= 0) bySub else try {
-            android.telephony.SubscriptionManager.getSlotIndex(simId)
+    /** the SIM as "SIM 1" / "SIM 2", or null when the id is not a real subscription */
+    fun simLabel(ctx: Context, simId: Int): String? =
+        if (!multiSim(ctx)) null else sims(ctx).firstOrNull { it.subId == simId }?.label
+            ?: slotLabel(simId)?.let { "SIM ${it + 1}" }
+
+    /** the slot number alone, for the small circular badge */
+    fun simShortLabel(ctx: Context, simId: Int): String? {
+        if (!multiSim(ctx)) return null
+        val slot = sims(ctx).firstOrNull { it.subId == simId }?.slot ?: slotLabel(simId) ?: return null
+        return if (slot >= 0) "${slot + 1}" else null
+    }
+
+    /** slot for a sub id, ignoring the ROM's 0/"empty" placeholder */
+    private fun slotLabel(simId: Int): Int? {
+        if (simId <= 0) return null
+        return try {
+            SubscriptionManager.getSlotIndex(simId).takeIf { it >= 0 }
         } catch (t: Throwable) {
-            -1
-        }
-        return when {
-            slot >= 0 -> "${slot + 1}"
-            simId >= 1 -> "$simId"
-            else -> null
+            null
         }
     }
 
-    private fun computeSims(ctx: Context): List<Pair<Int, String>> = try {
-        val sm = ctx.getSystemService(android.telephony.SubscriptionManager::class.java)
-        val list = sm.activeSubscriptionInfoList
-        android.util.Log.i("SMSSim", "active subs=${list?.size ?: -1}")
-        val fromManager = list.orEmpty().map { info ->
-            info.subscriptionId to (info.displayName?.toString() ?: "SIM ${info.simSlotIndex + 1}")
+    private fun computeSims(ctx: Context): List<Sim> {
+        // 1. the framework list, when this ROM deigns to return it
+        val fromManager = try {
+            ctx.getSystemService(android.telephony.SubscriptionManager::class.java)
+                ?.activeSubscriptionInfoList.orEmpty()
+                .filter { it.subscriptionId > 0 }
+                .map { info ->
+                    Sim(info.subscriptionId, info.simSlotIndex,
+                        info.carrierName?.toString(), info.number)
+                }
+        } catch (t: Throwable) {
+            emptyList()
         }
-        // MIUI hands out an empty info list even to the default SMS app. Fall back to the sub ids
-        // actually carrying messages, newest first, capped at the phone's SIM count: stale sub ids
-        // and the ROM's 0/"empty" placeholder would otherwise show phantom SIMs.
-        fromManager.ifEmpty {
-            val lastSeen = HashMap<Int, Long>()
-            val col = detectSimColumn(ctx)
-            if (col.isNotEmpty()) {
-                try {
-                    ctx.contentResolver.query(
-                        Telephony.Sms.CONTENT_URI, arrayOf(col, Telephony.Sms.DATE), null, null, null
-                    )?.use { c ->
-                        var rows = 0
-                        while (c.moveToNext() && rows < 2000) {
-                            rows++
-                            val v = c.getInt(0)
-                            val ts = c.getLong(1)
-                            if (v >= 0) lastSeen[v] = maxOf(lastSeen[v] ?: 0L, ts)
-                        }
-                    }
-                } catch (t: Throwable) {
-                }
-            }
-            val phoneCount = try {
-                ctx.getSystemService(android.telephony.TelephonyManager::class.java)?.phoneCount ?: 0
+        android.util.Log.i("SMSSim", "subs=" + fromManager.joinToString { "${it.subId}@slot${it.slot}" })
+        if (fromManager.isNotEmpty()) return fromManager.sortedBy { it.slot }
+
+        // 2. MIUI hands out an empty info list even to the default SMS app, but the subscription
+        //    database behind SubscriptionManager still has the truth: sub id, slot, carrier, number.
+        simInfoFromProvider(ctx)?.takeIf { it.isNotEmpty() }?.let { return it }
+
+        // 3. last resort: the sub ids that actually carry messages. sub id 0 is the ROM's "unknown"
+        //    placeholder and must never become a row - it used to beat the real SIM in this list and
+        //    then both rows labelled themselves "SIM 1".
+        val dbs = dbSubIds(ctx).filter { it > 0 }
+        if (dbs.isEmpty()) {
+            val def = try {
+                SubscriptionManager.getDefaultSmsSubscriptionId()
             } catch (t: Throwable) {
-                0
+                SubscriptionManager.INVALID_SUBSCRIPTION_ID
             }
-            if (lastSeen.isEmpty()) {
-                try {
-                    lastSeen[SubscriptionManager.getDefaultSmsSubscriptionId()] = 0L
-                } catch (t: Throwable) {
-                }
+            return if (def > 0) listOf(Sim(def, subscriptionSlot(def))) else emptyList()
+        }
+        // one row per physical slot: duplicate spellings of the same card are one SIM
+        val resolved = dbs.mapNotNull { sub ->
+            val slot = slotLabel(sub) ?: return@mapNotNull null
+            // carrier comes from the telephony manager per subscription: the info list is empty on
+            // this ROM, so this is the only name a person can recognise a card by
+            Sim(sub, slot, carrierOf(ctx, sub))
+        }.distinctBy { it.slot }.sortedBy { it.slot }
+        android.util.Log.i("SMSSim", "db subs=" + dbs + " -> " + resolved.joinToString { "${it.subId}@slot${it.slot}(${it.carrier})" })
+        return resolved
+    }
+
+    /** carrier name for a subscription, or null when the ROM will not say */
+    private fun carrierOf(ctx: Context, subId: Int): String? = try {
+        val tm = ctx.getSystemService(android.telephony.TelephonyManager::class.java)
+            ?.createForSubscriptionId(subId)
+        listOfNotNull(
+            tm?.networkOperatorName,
+            tm?.simOperatorName,
+            tm?.simCarrierIdName?.toString()
+        ).firstOrNull { it.isNotBlank() }
+    } catch (t: Throwable) {
+        null
+    }
+
+    /** subscriptions straight out of the telephony subscription database */
+    private fun simInfoFromProvider(ctx: Context): List<Sim>? = try {
+        ctx.contentResolver.query(
+            android.net.Uri.parse("content://telephony/siminfo"),
+            arrayOf("_id", "sim_slot_index", "display_name", "carrier_name", "number"),
+            null, null, null
+        )?.use { c ->
+            val out = ArrayList<Sim>()
+            while (c.moveToNext()) {
+                val sub = c.getInt(0)
+                if (sub <= 0) continue
+                val slot = c.getInt(1).takeIf { it >= 0 } ?: continue
+                val display = c.getString(2)?.trim()?.takeIf { it.isNotEmpty() }
+                val carrier = c.getString(3)?.trim()?.takeIf { it.isNotEmpty() } ?: display
+                out += Sim(sub, slot, carrier, c.getString(4))
             }
-            lastSeen.entries
-                .filter { it.key >= 0 }
-                .sortedByDescending { it.value }
-                .let { if (phoneCount > 0) it.take(phoneCount) else it }
-                .mapIndexed { index, e ->
-                    val slot = try {
-                        SubscriptionManager.getSlotIndex(e.key)
-                    } catch (t: Throwable) {
-                        -1
-                    }
-                    e.key to "SIM ${if (slot >= 0) slot + 1 else index + 1}"
-                }
+            out.distinctBy { it.slot }.sortedBy { it.slot }
         }
     } catch (t: Throwable) {
-        emptyList()
+        // no READ_PHONE_STATE or a locked-down provider: try the next source
+        android.util.Log.i("SMSSim", "siminfo query failed: ${t.javaClass.simpleName}")
+        null
+    }
+
+    private fun subscriptionSlot(subId: Int): Int = try {
+        SubscriptionManager.getSlotIndex(subId)
+    } catch (t: Throwable) {
+        -1
+    }
+
+    /** sub ids that carried at least one stored message, newest activity first */
+    private fun dbSubIds(ctx: Context): List<Int> {
+        val col = detectSimColumn(ctx)
+        if (col.isEmpty()) return emptyList()
+        val lastSeen = HashMap<Int, Long>()
+        try {
+            ctx.contentResolver.query(
+                Telephony.Sms.CONTENT_URI, arrayOf(col, Telephony.Sms.DATE), null, null, null
+            )?.use { c ->
+                var rows = 0
+                while (c.moveToNext() && rows < 2000) {
+                    rows++
+                    val v = c.getInt(0)
+                    val ts = c.getLong(1)
+                    if (v >= 0) lastSeen[v] = maxOf(lastSeen[v] ?: 0L, ts)
+                }
+            }
+        } catch (t: Throwable) {
+        }
+        return lastSeen.entries.sortedByDescending { it.value }.map { it.key }
     }
 
     fun deleteThread(ctx: Context, threadId: Long) {
@@ -337,8 +411,17 @@ object Sms {
         }
     }
 
-    fun insertInbox(ctx: Context, address: String, body: String, date: Long): Long = try {
+    /**
+     * Write a message into the inbox.
+     *
+     * [subId] is required on purpose: a default let every caller forget it, and a row without a
+     * subscription id has no SIM badge anywhere in the UI. Pass -1 explicitly when the SIM is
+     * genuinely unknown (restoring an old ad), never "because it was optional".
+     */
+    fun insertInbox(ctx: Context, address: String, body: String, date: Long, subId: Int): Long = try {
+        val simCol = detectSimColumn(ctx)
         val cv = ContentValues().apply {
+            if (simCol.isNotEmpty() && subId > 0) put(simCol, subId)
             put(Telephony.Sms.ADDRESS, address)
             put(Telephony.Sms.BODY, body)
             put(Telephony.Sms.DATE, date)
@@ -352,17 +435,85 @@ object Sms {
         -1
     }
 
-    fun send(ctx: Context, address: String, body: String, preferredSub: Int? = null): Boolean = try {
-        val subId = preferredSub ?: SubscriptionManager.getDefaultSmsSubscriptionId()
-        val sm: SmsManager = if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID &&
-            android.os.Build.VERSION.SDK_INT >= 31
-        ) ctx.getSystemService(SmsManager::class.java).createForSubscriptionId(subId)
-        else SmsManager.getDefault()
+    /**
+     * Send, and report truthfully: the stored copy starts as STATUS_PENDING, the carrier's send
+     * callback flips it to complete/failed, and the delivery callback marks it delivered.
+     * [ok] is false only when the SmsManager call itself threw (missing permission, no radio).
+     */
+    data class SendResult(val ok: Boolean, val rowId: Long)
 
-        val parts = sm.divideMessage(body)
-        if (parts.size > 1) sm.sendMultipartTextMessage(address, null, parts, null, null)
-        else sm.sendTextMessage(address, null, body, null, null)
+    fun send(ctx: Context, address: String, body: String, preferredSub: Int? = null): Boolean =
+        sendTracked(ctx, address, body, preferredSub).ok
 
+    fun sendTracked(
+        ctx: Context,
+        address: String,
+        body: String,
+        preferredSub: Int? = null
+    ): SendResult {
+        val subId = preferredSub ?: try {
+            SubscriptionManager.getDefaultSmsSubscriptionId()
+        } catch (t: Throwable) {
+            SubscriptionManager.INVALID_SUBSCRIPTION_ID
+        }
+        // store the copy first: its row id is what the send and delivery callbacks update
+        val rowId = insertSent(ctx, address, body, subId, Telephony.Sms.STATUS_PENDING)
+        return try {
+            val sm: SmsManager = if (subId != SubscriptionManager.INVALID_SUBSCRIPTION_ID &&
+                android.os.Build.VERSION.SDK_INT >= 31
+            ) ctx.getSystemService(SmsManager::class.java).createForSubscriptionId(subId)
+            else SmsManager.getDefault()
+
+            val sent = statusIntent(ctx, rowId, SendStatus.ACTION_SENT) ?: run {
+                markStatus(ctx, rowId, Telephony.Sms.STATUS_FAILED)
+                return SendResult(false, rowId)
+            }
+            val delivered = statusIntent(ctx, rowId, SendStatus.ACTION_DELIVERED)
+            val parts = sm.divideMessage(body)
+            if (parts.size > 1) {
+                sm.sendMultipartTextMessage(
+                    address, null, parts,
+                    ArrayList(parts.indices.map { sent }),
+                    delivered?.let { ArrayList(parts.indices.map { _ -> it }) }
+                )
+            } else {
+                sm.sendTextMessage(address, null, body, sent, delivered)
+            }
+            SendResult(true, rowId)
+        } catch (t: Throwable) {
+            // never silent: a missing SEND_SMS grant used to look like "the app cannot send SMS at all"
+            android.util.Log.e("SMSFilter", "send failed to=$address sub=$subId", t)
+            markStatus(ctx, rowId, Telephony.Sms.STATUS_FAILED)
+            SendResult(false, rowId)
+        }
+    }
+
+    private fun statusIntent(ctx: Context, rowId: Long, action: String): android.app.PendingIntent? {
+        if (rowId <= 0) return null
+        val intent = android.content.Intent(ctx, SendStatusReceiver::class.java).apply {
+            this.action = action
+            putExtra("row", rowId)
+        }
+        return android.app.PendingIntent.getBroadcast(
+            ctx, (rowId.toString() + action).hashCode(), intent,
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+        )
+    }
+
+    private fun markStatus(ctx: Context, rowId: Long, status: Int) {
+        if (rowId <= 0) return
+        try {
+            ctx.contentResolver.update(
+                Telephony.Sms.CONTENT_URI,
+                ContentValues().apply { put(Telephony.Sms.STATUS, status) },
+                "${Telephony.Sms._ID}=?", arrayOf(rowId.toString())
+            )
+        } catch (t: Throwable) {
+        }
+    }
+
+    /** the sent copy of one message; -1 when the provider refused it */
+    private fun insertSent(ctx: Context, address: String, body: String, subId: Int, status: Int): Long =
         try {
             val simCol = detectSimColumn(ctx)
             ctx.contentResolver.insert(Telephony.Sms.Sent.CONTENT_URI, ContentValues().apply {
@@ -373,13 +524,13 @@ object Sms {
                 put(Telephony.Sms.BODY, body)
                 put(Telephony.Sms.DATE, System.currentTimeMillis())
                 put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_SENT)
-                put(Telephony.Sms.STATUS, Telephony.Sms.STATUS_COMPLETE)
-            })
-        } catch (e: Throwable) {
-            // the SMS already left the phone; a failed archive copy is not a send failure
+                put(Telephony.Sms.STATUS, status)
+            })?.lastPathSegment?.toLongOrNull() ?: -1L.also {
+                android.util.Log.e("SMSFilter", "sent copy refused by provider (no row id)")
+            }
+        } catch (t: Throwable) {
+            // the SMS can still leave the phone; a failed archive copy is not a send failure
+            android.util.Log.e("SMSFilter", "sent copy insert failed", t)
+            -1L
         }
-        true
-    } catch (t: Throwable) {
-        false
-    }
 }

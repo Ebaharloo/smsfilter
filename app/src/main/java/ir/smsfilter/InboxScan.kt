@@ -73,9 +73,8 @@ object InboxScan {
             // no permission / provider trouble: report what was done instead of throwing
         }
 
-        ThreadFlags.markSpam(ctx, threads)
-        ThreadFlags.setArchived(ctx, threads, true)
-        threads.forEach { Sms.markThreadRead(ctx, it) }
+        // Copies only: the scan never hides or removes a conversation. The user decides on the Ads
+        // page; anything the filter was unsure about stays exactly where it is, in the inbox.
         return Result(scanned = scanned, spam = spam, threads = threads.size)
     }
 
@@ -103,7 +102,7 @@ object InboxScan {
             } ?: return@forEach
             if (v.label == Label.SPAM) return@forEach
             store.relabelCopies(m.sender, m.text, Label.IMPORTANT)
-            Sms.insertInbox(ctx, m.sender, m.text, m.ts)
+            Sms.insertInbox(ctx, m.sender, m.text, m.ts, -1)
             Sms.threadIdFor(ctx, m.sender)?.let { tid -> threads += tid }
             restored++
         }

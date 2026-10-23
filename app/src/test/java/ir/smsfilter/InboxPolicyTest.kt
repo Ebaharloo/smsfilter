@@ -55,13 +55,13 @@ class InboxPolicyTest {
     }
 
     @Test
-    fun spamMarkedConversationsLeaveBothInboxAndArchive() {
+    fun suspectedAdConversationStaysVisible() {
         val rows = listOf(bank, ad, friend)
         // archived by the user: only in Archive
         assertEquals(listOf(2L), InboxPolicy.visible(rows, setOf(2), true).map { it.id })
-        // marked as advertising: in neither list, it belongs to the Ads page
-        assertEquals(listOf(1L, 3L), InboxPolicy.visible(rows, emptySet(), false, spamIds = setOf(2)).map { it.id })
-        assertEquals(0, InboxPolicy.visible(rows, setOf(2), true, spamIds = setOf(2)).size)
+        // a spam mark must never make a conversation invisible: the user has to be able to see it
+        // and decide. The ad copy lives on the Ads page; the conversation stays in the inbox.
+        assertEquals(listOf(1L, 2L, 3L), InboxPolicy.visible(rows, emptySet(), false, spamIds = setOf(2)).map { it.id })
     }
 
     @Test
@@ -188,13 +188,17 @@ class InboxPolicyTest {
         assertEquals(listOf(12L, 11L, 10L), ordered.map { it.id })
     }
 
-    /** search must never resurrect a hidden ad, whatever the query says */
+    /** search must never resurrect an archived conversation, whatever the query says */
     @Test
     fun searchStaysInsideTheVisibleList() {
         val rows = listOf(bank, ad, friend)
-        // the ad is searchable in neither the inbox nor the archive once it is spam-marked
-        assertTrue(InboxPolicy.visible(rows, emptySet(), false, "OFF50", spamIds = setOf(2)).isEmpty())
-        assertTrue(InboxPolicy.visible(rows, setOf(2), true, "OFF50", spamIds = setOf(2)).isEmpty())
+        // an archived conversation is not searchable from the inbox...
+        assertTrue(InboxPolicy.visible(rows, setOf(2), false, "OFF50").isEmpty())
+        // ...but nothing else may hide it: a suspected ad stays findable in the inbox
+        assertEquals(
+            listOf(2L),
+            InboxPolicy.visible(rows, emptySet(), false, "OFF50", spamIds = setOf(2)).map { it.id }
+        )
         // the same query still finds the bank message where it is actually visible
         assertEquals(
             listOf(1L),

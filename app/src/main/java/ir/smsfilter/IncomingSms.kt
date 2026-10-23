@@ -97,7 +97,10 @@ class IncomingSms : BroadcastReceiver() {
         val isSpam = filtering && (blocked || verdict?.label == Label.SPAM)
 
         var stored = -1L
-        if (!isSpam) stored = Sms.insertInbox(ctx, address, body, date)
+        // the subscription the message arrived on: without it the stored row has no SIM and the
+        // conversation row loses its SIM circle
+        val subId = intent.getIntExtra("subscription", -1)
+        if (!isSpam) stored = Sms.insertInbox(ctx, address, body, date, subId)
 
         // one write per message: the classified verdict, or a fail-safe note when the provider
         // refused the insert (role lost mid-flight) - nothing may vanish

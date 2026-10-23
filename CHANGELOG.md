@@ -2,6 +2,43 @@
 
 All notable changes to SMS Filter. Versions follow `versionName` in `app/build.gradle.kts`.
 
+## 0.3.2 — 2026-10-23
+
+### SIM picker now tells the truth
+
+- Rows are **SIM 1 / SIM 2 by physical slot**, taken from the framework
+  (`dumpsys isub`: sub id 2 → slot 0, sub id 1 → slot 1 on this phone). The old sheet printed the
+  raw subscription id and, because the ROM's `sub_id = 0` placeholder was treated as a SIM, both
+  rows could label themselves "SIM 1".
+- Sources in order: framework subscription list → the telephony `siminfo` database (MIUI blocks it
+  for this app too, kept for other ROMs) → the sub ids that actually carry messages. `sub_id <= 0`
+  is never a SIM; duplicates collapse to one row per slot.
+- Subtitle is carrier (and the last digits of the number when the SIM exposes one) instead of
+  "subscription id N".
+
+### Sending, sent state, delivery reports
+
+- **Send failures are no longer silent.** `Sms.send` swallows nothing: a missing `SEND_SMS` grant
+  used to look like "this app cannot send SMS". Now the text goes back into the composer, a toast
+  explains, and the permission dialog is opened when that is the cause.
+- **Sent copy is written as pending and updated by the carrier**: `STATUS_PENDING` →
+  `STATUS_COMPLETE` / `STATUS_FAILED` via the SmsManager send callback (per part, one row id).
+- **Delivery reports**: the delivery callback marks the row delivered in our own prefs (Android has
+  no "delivered" column for SMS), and the thread shows `…` pending, `✓` sent, `✓✓` delivered,
+  `!` failed next to the timestamp.
+- Settings lists `send SMS` permission state next to read SMS and contacts.
+
+### Other
+
+- Drawer footer reads the real `versionName` instead of a hardcoded string.
+- Conversation header shows only the SIM circle (1 / 2) — the "SIM 1" text next to it repeated the same
+  fact. Tapping the circle opens the SIM picker.
+- Filtered or suspected conversations are **never hidden**: `spam_threads` no longer removes a row from
+  Inbox or Archive, "Scan inbox for ads" only copies ads to the Ads page, and a heavy swipe moves a
+  conversation there by removing its messages (reversible with "Not an ad — restore to inbox").
+- A contact with several numbers shows the last 4 digits on each affected row, so two conversations with
+  the same contact name are distinguishable.
+
 ## 0.3 — 2026-10-23
 
 Responsiveness pass after a full code review. No change to the filter policy or its numbers:

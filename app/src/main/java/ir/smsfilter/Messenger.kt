@@ -165,8 +165,10 @@ private fun SimBadge(simId: Int, size: Int = 16, fontSize: Int = 9) {
 @Composable
 private fun simLabel(simId: Int): String? {
     val ctx = LocalContext.current
-    return remember(simId) { Sms.simLabel(ctx, simId) }
+    return remember(simId) { Sms.simShortLabel(ctx, simId) }
 }
+
+/** "SIM 1" for the picker and labels; the small badge uses [Sms.simShortLabel] */
 
 /**
  * Everything the conversation list needs, loaded as one snapshot.
@@ -184,7 +186,9 @@ data class InboxData(
     val muted: Set<Long>,
     val archived: Set<Long>,
     val spam: Set<Long>,
-    val contactSuffixes: Set<String>
+    val contactSuffixes: Set<String>,
+    /** contact names that belong to more than one number: those rows also show the last digits */
+    val ambiguousNames: Set<String> = emptySet()
 )
 
 @Composable
@@ -215,6 +219,7 @@ fun ConversationsPage(
     val archived = data?.archived.orEmpty()
     val spamIds = data?.spam.orEmpty()
     val contactSuffixes = data?.contactSuffixes.orEmpty()
+    val ambiguousNames = data?.ambiguousNames.orEmpty()
     val simByThread = remember(threads) { threads.associate { it.id to it.simId } }
 
     // list rules stay in InboxPolicy so they are unit-tested without Android. Memoized: this used
@@ -251,6 +256,7 @@ fun ConversationsPage(
     fun filterThread(row: ThreadRow) = scope.launch {
         withContext(Dispatchers.IO) {
             AdActions.markAd(ctx, store, learned, row.address, row.snippet, row.date, row.id)
+            AdActions.moveConversationToAds(ctx, row.id)
         }
         onReload()
         snack.showSnackbar("Moved to Ads — the filter learned from it")
@@ -372,6 +378,7 @@ fun ConversationsPage(
                                 name = names[row.address],
                                 preview = previews[row.id] ?: row.snippet,
                                 multiSim = multiSimOn,
+                                showNumber = names[row.address] in ambiguousNames,
                                 pinned = row.id in pinned,
                                 muted = row.id in muted,
                                 selected = selected,
@@ -443,22 +450,28 @@ private fun SimPickerSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
             }
-            sims.forEach { (sub, label) ->
+            sims.forEach { sim ->
                 Row(
-                    Modifier.fillMaxWidth().clickable { onPick(sub) }
+                    Modifier.fillMaxWidth().clickable { onPick(sim.subId) }
                         .padding(horizontal = 20.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    SimBadge(sub, 22, 11)
+                    SimBadge(sim.subId, 22, 11)
                     Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                        Text(label, fontSize = 16.sp)
-                        Text(
-                            "subscription id $sub",
+                        Text(sim.label, fontSize = 16.sp)
+                        // carrier and the last digits identify the card; a subscription id never did.
+                        // Both cards can be the same carrier, so the slot above is the real label.
+                        val sub = listOfNotNull(
+                            sim.carrier,
+                            sim.number?.filter { it.isDigit() }?.takeLast(4)?.let { "…$it" }
+                        ).joinToString(" · ")
+                        if (sub.isNotEmpty()) Text(
+                            sub,
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    RadioButton(selected = sub == selected, onClick = { onPick(sub) })
+                    RadioButton(selected = sim.subId == selected, onClick = { onPick(sim.subId) })
                 }
             }
         }
@@ -597,6 +610,7 @@ private fun ConversationRow(
     name: String?,
     preview: String,
     multiSim: Boolean,
+    showNumber: Boolean = false,
     pinned: Boolean,
     muted: Boolean,
     selected: Boolean,
@@ -626,7 +640,10 @@ private fun ConversationRow(
                 }
                 if (multiSim && simId >= 0) SimBadge(simId, 15, 9)
                 Text(
-                    name ?: remember(row.address) { Contacts.displayName(row.address) },
+                    // a contact with several numbers would otherwise show the same name twice
+                    (name ?: remember(row.address) { Contacts.displayName(row.address) }) +
+                        if (showNumber && name != null)
+                            " · ${Contacts.digits(row.address).takeLast(4)}" else "",
                     fontSize = 17.sp,
                     fontWeight = if (row.unread > 0) FontWeight.SemiBold else FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurface,
@@ -722,6 +739,8 @@ fun ThreadPage(
     var sendSim by remember { mutableStateOf<Int?>(null) }
     var chooseSim by remember { mutableStateOf(false) }
     var confirmDeleteThread by remember { mutableStateOf(false) }
+    // sent rows that the carrier confirmed as delivered (there is no provider column for that)
+    var deliveredIds by remember { mutableStateOf(setOf<String>()) }
     // one binder call per screen, not one per bubble and per row
     val multiSimOn = remember { Sms.multiSim(ctx) }
     val listState = rememberLazyListState()
@@ -732,12 +751,23 @@ fun ThreadPage(
         }
         resolvedId = id
         messages = withContext(Dispatchers.IO) { Sms.messages(ctx, id) }
+        deliveredIds = withContext(Dispatchers.IO) { SendStatus.delivered(ctx) }
         if (name == null) name = withContext(Dispatchers.IO) {
             Contacts.nameFor(ctx, address)?.takeIf { Contacts.digits(it) != Contacts.digits(address) }
         }
         if (sendSim == null) {
-            val incomingSim = messages.lastOrNull { it.incoming }?.simId?.takeIf { it >= 0 }
-            sendSim = incomingSim ?: withContext(Dispatchers.IO) { Sms.sims(ctx).firstOrNull()?.first }
+            val incomingSim = messages.lastOrNull { it.incoming }?.simId?.takeIf { it > 0 }
+            sendSim = incomingSim ?: withContext(Dispatchers.IO) {
+                // a brand-new conversation goes out on the phone's default SMS SIM, not on whichever
+                // card happened to be newest in the inbox
+                val def = try {
+                    android.telephony.SubscriptionManager.getDefaultSmsSubscriptionId()
+                } catch (t: Throwable) {
+                    -1
+                }
+                val sims = Sms.sims(ctx)
+                sims.firstOrNull { it.subId == def }?.subId ?: sims.firstOrNull()?.subId
+            }
         }
         if (id > 0) {
             withContext(Dispatchers.IO) { Sms.markThreadRead(ctx, id) }
@@ -756,6 +786,7 @@ fun ThreadPage(
         if (!liveReady) { liveReady = true; return@LaunchedEffect }
         val id = resolvedId.takeIf { it > 0 } ?: return@LaunchedEffect
         messages = withContext(Dispatchers.IO) { Sms.messages(ctx, id) }
+        deliveredIds = withContext(Dispatchers.IO) { SendStatus.delivered(ctx) }
     }
     LaunchedEffect(messages.size) {
         // jump straight to the newest bubble: animating from index 0 looked like the app scrolling by itself
@@ -773,7 +804,23 @@ fun ThreadPage(
         draft = ""
         prefs.edit().remove(draftKey).apply()
         scope.launch {
-            withContext(Dispatchers.IO) { Sms.send(ctx, address, text, sub) }
+            val result = withContext(Dispatchers.IO) { Sms.sendTracked(ctx, address, text, sub) }
+            if (!result.ok) {
+                // a silent failure looked exactly like "this app cannot send SMS": say what went
+                // wrong, put the text back, and ask for the permission when that is the reason
+                val missing = androidx.core.content.ContextCompat.checkSelfPermission(
+                    ctx, android.Manifest.permission.SEND_SMS
+                ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (draft.isBlank()) draft = text
+                if (missing) (ctx as? androidx.activity.ComponentActivity)?.requestPermissions(
+                    arrayOf(android.Manifest.permission.SEND_SMS), 2
+                )
+                Toast.makeText(
+                    ctx,
+                    if (missing) "Allow the SMS permission, then send again" else "Message not sent — try again",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
             reload()
         }
     }
@@ -783,6 +830,8 @@ fun ThreadPage(
     }
     // day chips, computed once per conversation instead of twice per visible row
     val dayOf = remember(visible) { visible.map { dayLabel(it.date) } }
+    // rows stored before the subscription id was recorded have simId 0: use the conversation's SIM
+    val threadSim = remember(messages) { messages.lastOrNull { it.simId > 0 }?.simId ?: -1 }
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
@@ -812,12 +861,9 @@ fun ThreadPage(
                 )
             }
             if (multiSimOn && (sendSim ?: -1) >= 0) {
-                Row(verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(end = 4.dp)) {
-                    SimBadge(sendSim ?: -1, 16, 10)
-                    Text("SIM ${simLabel(sendSim ?: -1) ?: ""}", fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 4.dp))
+                // the circle already says which SIM; the text next to it was pure repetition
+                IconButton(onClick = { chooseSim = true }) {
+                    SimBadge(sendSim ?: -1, 20, 10)
                 }
             }
             IconButton(onClick = { findOpen = !findOpen; if (!findOpen) find = "" }) {
@@ -857,6 +903,7 @@ fun ThreadPage(
                             scope.launch {
                                 withContext(Dispatchers.IO) {
                                     AdActions.markAd(ctx, null, learned, address, sample, threadId = resolvedId)
+                                    AdActions.moveConversationToAds(ctx, resolvedId)
                                 }
                                 onBack()
                             }
@@ -963,6 +1010,8 @@ fun ThreadPage(
                     m = m,
                     grouped = grouped,
                     multiSim = multiSimOn,
+                    delivered = m.id.toString() in deliveredIds,
+                    fallbackSim = threadSim,
                     onLongPress = { selected = m },
                     onUrl = { url -> openUrl(ctx, url) },
                     onCall = { number -> dial(ctx, number) },
@@ -1154,6 +1203,8 @@ private fun Bubble(
     m: Sms.Message,
     grouped: Boolean,
     multiSim: Boolean,
+    delivered: Boolean,
+    fallbackSim: Int = -1,
     onLongPress: () -> Unit,
     onUrl: (String) -> Unit,
     onCall: (String) -> Unit,
@@ -1166,15 +1217,36 @@ private fun Bubble(
     val url = remember(m.body) { InboxPolicy.URL.find(m.body)?.value }
     val phone = remember(m.body) { if (url == null) InboxPolicy.PHONE.find(m.body)?.value else null }
     val otp = remember(m.body) { IncomingSms.otpOf(m.body) }
+    // rows written before this app stored the subscription id have 0: use the conversation's SIM
+    val bubbleSim = if (m.simId > 0) m.simId else fallbackSim
 
     Column(Modifier.fillMaxWidth().padding(top = if (grouped) 2.dp else 8.dp)) {
         Row(Modifier.fillMaxWidth(),
             horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
             Row(verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
-                if (multiSim) SimBadge(m.simId)
+                if (multiSim) SimBadge(bubbleSim)
                 Text(stampFmt.format(Date(m.date)), fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // send state on outgoing bubbles: "…" pending, "✓" sent, "✓✓" delivered, "!" failed
+                if (mine) {
+                    val glyph = when {
+                        delivered -> "✓✓"
+                        m.status == android.provider.Telephony.Sms.STATUS_FAILED -> "!"
+                        m.status == android.provider.Telephony.Sms.STATUS_PENDING -> "…"
+                        else -> "✓"
+                    }
+                    Text(
+                        glyph,
+                        fontSize = 11.sp,
+                        color = when {
+                            delivered -> MaterialTheme.colorScheme.primary
+                            m.status == android.provider.Telephony.Sms.STATUS_FAILED -> MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        modifier = Modifier.padding(start = 4.dp)
+                    )
+                }
             }
         }
         Row(Modifier.fillMaxWidth(),

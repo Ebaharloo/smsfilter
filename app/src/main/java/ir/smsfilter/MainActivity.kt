@@ -204,7 +204,12 @@ fun App(
                 muted = ThreadFlags.muted(ctx),
                 archived = ThreadFlags.archived(ctx) + ThreadFlags.locallyArchived(ctx),
                 spam = ThreadFlags.spamThreads(ctx),
-                contactSuffixes = Contacts.suffixes(ctx)
+                contactSuffixes = Contacts.suffixes(ctx),
+                // one person with two numbers: both rows would show the same name, so the list adds
+                // the last digits to tell the conversations apart
+                ambiguousNames = HashMap<String, Int>().also { counts ->
+                    names.values.forEach { n -> counts[n] = (counts[n] ?: 0) + 1 }
+                }.filterValues { it > 1 }.keys
             )
         }
         inbox = fresh
@@ -276,7 +281,15 @@ fun App(
                         )
                     }
                     Divider(Modifier.padding(vertical = 8.dp))
-                    Text("v0.3 · offline · on-device", style = MaterialTheme.typography.labelSmall,
+                    // read the real versionName: a hardcoded string went stale every release
+                    val version = remember {
+                        try {
+                            ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName
+                        } catch (t: Throwable) {
+                            null
+                        }
+                    }
+                    Text("v${version ?: "?"} · offline · on-device", style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
                 }
             }
@@ -415,7 +428,7 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                                     }
                                     refresh()
                                     snack.showSnackbar(
-                                        "scanned ${result.scanned} · moved ${result.spam} ads out of ${result.threads} conversations"
+                                        "scanned ${result.scanned} · kept ${result.spam} ads for review — nothing hidden"
                                     )
                                 }
                             }
@@ -772,6 +785,7 @@ fun SettingsPage() {
     }
     var listenerOk by remember { mutableStateOf(false) }
     var smsOk by remember { mutableStateOf(false) }
+    var sendOk by remember { mutableStateOf(false) }
     var contactsOk by remember { mutableStateOf(false) }
     var isDefaultSms by remember { mutableStateOf(false) }
     val roleManager = remember { ctx.getSystemService(RoleManager::class.java) }
@@ -787,6 +801,8 @@ fun SettingsPage() {
         smsOk = androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_SMS) ==
             PackageManager.PERMISSION_GRANTED
         contactsOk = androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) ==
+            PackageManager.PERMISSION_GRANTED
+        sendOk = androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.SEND_SMS) ==
             PackageManager.PERMISSION_GRANTED
         isDefaultSms = roleManager?.isRoleAvailable(RoleManager.ROLE_SMS) == true &&
             roleManager.isRoleHeld(RoleManager.ROLE_SMS)
@@ -828,6 +844,7 @@ fun SettingsPage() {
         Text("Permissions", style = MaterialTheme.typography.titleMedium)
         Text("notification access: ${if (listenerOk) "granted" else "missing"}")
         Text("read SMS: ${if (smsOk) "granted" else "missing"}")
+        Text("send SMS: ${if (sendOk) "granted" else "missing"}")
         Text("contacts: ${if (contactsOk) "granted" else "missing"}")
         TextButton(onClick = {
             (ctx as? ComponentActivity)?.requestPermissions(

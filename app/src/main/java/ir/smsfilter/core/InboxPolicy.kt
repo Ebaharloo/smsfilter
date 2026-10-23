@@ -100,7 +100,13 @@ object InboxPolicy {
         "ثبت‌نام", "ارسال رایگان", "مشاوره", "سرمایه", "درآمد", "کد تخفیف"
     )
 
-    /** archived rows are hidden from the inbox and shown only in the archive view */
+    /**
+     * Archived rows are hidden from the inbox and shown only in the archive view.
+     *
+     * [spamIds] is deliberately NOT applied: a conversation the filter suspected must never become
+     * invisible. Ads are recorded on the Ads page, and a conversation the user filtered leaves the
+     * inbox by removing its messages - not by a flag that hides it from both lists with no trace.
+     */
     fun visible(
         rows: List<ThreadRow>,
         archivedIds: Set<Long>,
@@ -109,11 +115,7 @@ object InboxPolicy {
         names: Map<String, String?> = emptyMap(),
         spamIds: Set<Long> = emptySet()
     ): List<ThreadRow> {
-        // a conversation the user (or a sweep) marked as advertising belongs to the Ads page only:
-        // showing it in Archive as well made the swipe look like it did nothing
-        val scoped = rows.filter {
-            it.id !in spamIds && if (archivedMode) it.id in archivedIds else it.id !in archivedIds
-        }
+        val scoped = rows.filter { if (archivedMode) it.id in archivedIds else it.id !in archivedIds }
         if (query.isBlank()) return scoped
         return scoped.filter { row ->
             row.address.contains(query, true) ||
