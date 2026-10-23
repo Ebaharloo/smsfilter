@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import org.json.JSONObject
 
 data class Msg(
     val id: Long,
@@ -15,7 +16,7 @@ data class Msg(
     val why: String
 )
 
-class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 3) {
+class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 4) {
 
     companion object {
         @Volatile private var inst: Store? = null
@@ -26,17 +27,40 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter
         }
     }
 
-    override fun onCreate(db: SQLiteDatabase) = db.execSQL(
-        "CREATE TABLE msg(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, sender TEXT, " +
-            "text TEXT NOT NULL, label TEXT NOT NULL, score INTEGER NOT NULL, why TEXT, " +
-            "manual INTEGER NOT NULL DEFAULT 0, UNIQUE(ts, text))"
-    )
+    override fun onCreate(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE msg(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, sender TEXT, " +
+                "text TEXT NOT NULL, label TEXT NOT NULL, score INTEGER NOT NULL, why TEXT, " +
+                "manual INTEGER NOT NULL DEFAULT 0, UNIQUE(ts, text))"
+        )
+        createLabels(db)
+    }
 
     override fun onUpgrade(db: SQLiteDatabase, old: Int, new: Int) {
-        // dev-stage schema: inbox scan needs UNIQUE(ts, text) for idempotent re-scans
-        db.execSQL("DROP TABLE IF EXISTS msg")
-        onCreate(db)
+        // 3 -> 4 only adds the append-only label table. Older versions dropped `msg` here, which
+        // threw away every stored ad and every user decision on a schema bump - never again.
+        if (old < 3) {
+            db.execSQL("DROP TABLE IF EXISTS msg")
+            db.execSQL(
+                "CREATE TABLE msg(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, sender TEXT, " +
+                    "text TEXT NOT NULL, label TEXT NOT NULL, score INTEGER NOT NULL, why TEXT, " +
+                    "manual INTEGER NOT NULL DEFAULT 0, UNIQUE(ts, text))"
+            )
+        }
+        createLabels(db)
     }
+
+    /**
+     * The user's own decisions, append-only.
+     *
+     * Deleting an ad from the Ads page used to delete its only copy, so the training signal the user
+     * had just produced disappeared - and "re-check with current filter" could overwrite a verdict he
+     * made by hand. Every tap is recorded here once and never rewritten: triage is done once.
+     */
+    private fun createLabels(db: SQLiteDatabase) = db.execSQL(
+        "CREATE TABLE IF NOT EXISTS labels(text TEXT NOT NULL, sender TEXT, label TEXT NOT NULL, " +
+            "ts INTEGER NOT NULL, PRIMARY KEY(text, label))"
+    )
 
     fun add(sender: String, text: String, v: Verdict, ts: Long = System.currentTimeMillis()): Long =
         writableDatabase.insertWithOnConflict("msg", null, ContentValues().apply {
@@ -47,6 +71,45 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter
         put("score", v.score)
         put("why", v.why.joinToString(", "))
     }, SQLiteDatabase.CONFLICT_IGNORE)
+
+    /** record a verdict the user made himself (ad / not an ad); survives deletes and re-checks */
+    fun recordLabel(sender: String, text: String, label: Label, ts: Long = System.currentTimeMillis()) {
+        if (text.isBlank()) return
+        writableDatabase.insertWithOnConflict("labels", null, ContentValues().apply {
+            put("text", text)
+            put("sender", sender)
+            put("label", label.name)
+            put("ts", ts)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun userLabelFor(text: String): String? =
+        readableDatabase.rawQuery("SELECT label FROM labels WHERE text=?", arrayOf(text)).use {
+            if (it.moveToFirst()) it.getString(0) else null
+        }
+
+    /** every user decision, for training and for "did the new model improve?" */
+    fun labels(): List<Triple<String, String, String>> {
+        val out = mutableListOf<Triple<String, String, String>>()
+        readableDatabase.rawQuery("SELECT text, sender, label FROM labels ORDER BY ts DESC", null).use { c ->
+            while (c.moveToNext()) out += Triple(c.getString(0), c.getString(1) ?: "", c.getString(2))
+        }
+        return out
+    }
+
+    fun labelCounts(): Map<String, Int> = labels().groupingBy { it.third }.eachCount()
+
+    /** JSONL the trainer reads; one object per line, no escaping surprises */
+    fun labelsJsonl(): String = buildString {
+        labels().forEach { (text, sender, label) ->
+            append(JSONObject().apply {
+                put("text", text)
+                put("sender", sender)
+                put("label", label)
+            }.toString())
+            append('\n')
+        }
+    }
 
     fun list(label: Label? = null, limit: Int = 300): List<Msg> {
         val where = if (label != null) "WHERE label=?" else ""

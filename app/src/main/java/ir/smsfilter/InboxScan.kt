@@ -100,6 +100,8 @@ object InboxScan {
             } catch (t: Throwable) {
                 null
             } ?: return@forEach
+            // a verdict the user made by hand is ground truth: re-check must never overwrite it
+            if (store.userLabelFor(m.text) != null) return@forEach
             if (v.label == Label.SPAM) return@forEach
             store.relabelCopies(m.sender, m.text, Label.IMPORTANT)
             Sms.insertInbox(ctx, m.sender, m.text, m.ts, -1)

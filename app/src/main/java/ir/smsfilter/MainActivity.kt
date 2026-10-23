@@ -439,6 +439,22 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                         )
                         DropdownMenuItem(text = { Text("Delete all ads") },
                             onClick = { menuOpen = false; confirmClear = true })
+                        DropdownMenuItem(
+                            text = { Text("Export labels for training") },
+                            onClick = {
+                                menuOpen = false
+                                scope.launch {
+                                    val path = withContext(Dispatchers.IO) {
+                                        val dir = ctx.getExternalFilesDir(null) ?: ctx.filesDir
+                                        dir.mkdirs()
+                                        val f = java.io.File(dir, "labels-${System.currentTimeMillis()}.jsonl")
+                                        f.writeText(store.labelsJsonl())
+                                        f.absolutePath
+                                    }
+                                    val n = store.labels().size
+                                    snack.showSnackbar("exported $n labels → $path")
+                                }
+                            })
                     }
                 }
             }
@@ -474,6 +490,8 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                                 }
                             },
                             onLeft = {
+                                // blocking is a user verdict too: keep it for training before acting
+                                withContext(Dispatchers.IO) { store.recordLabel(m.sender, m.text, Label.SPAM) }
                                 Blocked.add(ctx, m.sender)
                                 // blocking is forward-looking: this stored ad stays until the user
                                 // restores or deletes it, and the snackbar has to say so
@@ -481,9 +499,13 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                             },
                             onHeavy = {
                                 scope.launch {
-                                    withContext(Dispatchers.IO) { store.delete(m.id) }
+                                    withContext(Dispatchers.IO) {
+                                        // keep the verdict even though the copy goes away
+                                        store.recordLabel(m.sender, m.text, Label.SPAM)
+                                        store.delete(m.id)
+                                    }
                                     refresh()
-                                    snack.showSnackbar("Ad deleted")
+                                    snack.showSnackbar("Ad deleted — your label is kept for training")
                                 }
                             }
                         ) {
@@ -607,7 +629,10 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                     headlineContent = { Text("Delete this ad") },
                     modifier = Modifier.clickable {
                         scope.launch {
-                            withContext(Dispatchers.IO) { store.delete(m.id) }
+                            withContext(Dispatchers.IO) {
+                                store.recordLabel(m.sender, m.text, Label.SPAM)
+                                store.delete(m.id)
+                            }
                             open = null
                             refresh()
                         }

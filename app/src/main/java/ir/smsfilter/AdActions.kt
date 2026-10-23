@@ -23,6 +23,9 @@ object AdActions {
     ) {
         if (body.isNotBlank()) learned?.markAd(sender, body)
         store?.add(sender, body, Verdict(Label.SPAM, 99, listOf("user:ad"), body), ts)
+        // the user's decision is the training data: record it where a delete or a re-check cannot
+        // erase it
+        store?.recordLabel(sender, body, Label.SPAM, ts)
         val tid = if (threadId > 0) threadId else Sms.threadIdFor(ctx, sender) ?: 0L
         // an earlier version flagged the thread so it vanished from Inbox AND Archive - a hidden
         // middle place the user could not find. Ads are recorded on the Ads page instead.
@@ -46,6 +49,7 @@ object AdActions {
      */
     fun restore(ctx: Context, store: Store, learned: Learned, m: Msg) {
         store.relabelCopies(m.sender, m.text, Label.IMPORTANT)
+        store.recordLabel(m.sender, m.text, Label.IMPORTANT, m.ts)
         learned.markImportant(m.sender)
         learned.allow(m.sender)
         // -1 = unknown: a restored old ad carries no reliable subscription id, and the thread picks
