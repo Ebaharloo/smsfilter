@@ -102,15 +102,9 @@ object Contacts {
     fun suffixOf(number: String): String? = digits(number).takeLast(9).takeIf { it.length == 9 }
 
     /** contact photo uri for a number, or null when there is none */
-    fun photoFor(ctx: Context, address: String): android.net.Uri? = try {
-        val uri = android.net.Uri.withAppendedPath(
-            ContactsContract.PhoneLookup.CONTENT_FILTER_URI, android.net.Uri.encode(address)
-        )
-        ctx.contentResolver.query(uri, arrayOf(ContactsContract.PhoneLookup.PHOTO_URI), null, null, null)
-            ?.use { c -> if (c.moveToFirst()) c.getString(0)?.let { android.net.Uri.parse(it) } else null }
-    } catch (t: Throwable) {
-        null
-    }
+    fun photoFor(ctx: Context, address: String): android.net.Uri? =
+        lookup(ctx, address, ContactsContract.PhoneLookup.PHOTO_URI)
+            ?.let { android.net.Uri.parse(it) }
 
     /** sender label as shown in a list: provider junk like ".IRANCELL." or "**bank**" cleaned up */
     fun displayName(address: String): String {
@@ -119,13 +113,27 @@ object Contacts {
     }
 
     /** contact display name for a number, or null when unknown */
-    fun nameFor(ctx: Context, address: String): String? = try {
-        val uri = android.net.Uri.withAppendedPath(
-            ContactsContract.PhoneLookup.CONTENT_FILTER_URI, android.net.Uri.encode(address)
-        )
-        ctx.contentResolver.query(uri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)
-            ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
-    } catch (t: Throwable) {
-        null
+    fun nameFor(ctx: Context, address: String): String? =
+        lookup(ctx, address, ContactsContract.PhoneLookup.DISPLAY_NAME)
+
+    /**
+     * PhoneLookup for every way this number could be dialled. A number arriving as +989121234567
+     * matched nothing when the contact was saved as 09121234567, so a saved sender still showed up
+     * as a bare number (that is the "is this contact saved?" question).
+     */
+    private fun lookup(ctx: Context, address: String, column: String): String? {
+        for (candidate in ir.smsfilter.core.ComposeIntent.lookupVariants(address)) {
+            try {
+                val uri = android.net.Uri.withAppendedPath(
+                    ContactsContract.PhoneLookup.CONTENT_FILTER_URI, android.net.Uri.encode(candidate)
+                )
+                ctx.contentResolver.query(uri, arrayOf(column), null, null, null)?.use { c ->
+                    if (c.moveToFirst()) c.getString(0)?.takeIf { it.isNotBlank() }?.let { return it }
+                }
+            } catch (t: Throwable) {
+                // provider trouble: fall through to the next form
+            }
+        }
+        return null
     }
 }

@@ -26,6 +26,8 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <!-- lets the dialer / contacts offer us as a messenger -->
+                <category android:name="android.intent.category.APP_MESSAGING" />
             </intent-filter>
             <!-- makes this app a candidate for the SMS role -->
             <intent-filter>
@@ -36,6 +38,23 @@
                 <data android:scheme="smsto" />
                 <data android:scheme="mms" />
                 <data android:scheme="mmsto" />
+            </intent-filter>
+            <!-- "message this number" from the address book, a call log or a browser sms: link -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SENDTO" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:mimeType="vnd.android-dir/mms-sms" />
             </intent-filter>
         </activity>
 

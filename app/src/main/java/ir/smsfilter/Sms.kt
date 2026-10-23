@@ -137,7 +137,12 @@ object Sms {
         return if (out.size > window) out.subList(out.size - window, out.size).toList() else out
     }
 
-    /** thread id for a number, asked of the provider directly - no inbox-wide grouping */
+    /**
+     * thread id for a number, asked of the provider directly - no inbox-wide grouping.
+     * The second pass compares national digits, because the address book hands us +989121234567
+     * while the provider may hold 09121234567; comparing raw 9-digit tails missed that and opened a
+     * duplicate conversation.
+     */
     fun threadIdFor(ctx: Context, address: String): Long? {
         try {
             ctx.contentResolver.query(
@@ -146,16 +151,16 @@ object Sms {
             )?.use { c -> if (c.moveToFirst()) return c.getLong(0) }
         } catch (t: Throwable) {
         }
-        val digits = Contacts.digits(address).takeLast(9)
-        if (digits.isEmpty()) return null
+        if (Contacts.digits(address).isEmpty()) return null
         try {
             ctx.contentResolver.query(
                 Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS),
                 null, null, null
             )?.use { c ->
                 while (c.moveToNext()) {
-                    val candidate = c.getString(1).orEmpty()
-                    if (Contacts.digits(candidate).takeLast(9) == digits) return c.getLong(0)
+                    if (ir.smsfilter.core.ComposeIntent.sameNumber(c.getString(1).orEmpty(), address)) {
+                        return c.getLong(0)
+                    }
                 }
             }
         } catch (t: Throwable) {

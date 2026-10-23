@@ -650,13 +650,31 @@ private fun ConversationRow(
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun ThreadPage(threadId: Long, address: String, learned: Learned? = null, onBack: () -> Unit) {
+fun ThreadPage(
+    threadId: Long,
+    address: String,
+    learned: Learned? = null,
+    initialBody: String? = null,
+    onBack: () -> Unit
+) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val prefs = remember { ctx.getSharedPreferences("drafts", 0) }
     var resolvedId by remember { mutableStateOf(threadId) }
     var messages by remember { mutableStateOf(listOf<Sms.Message>()) }
-    var draft by remember { mutableStateOf(prefs.getString(threadId.toString(), "").orEmpty()) }
+    // drafts are keyed by thread, but a brand-new conversation has no thread yet (-1) - keying on
+    // that put every unsaved number in the same bucket and leaked text between conversations
+    val draftKey = remember(threadId, address) {
+        if (threadId > 0) "t$threadId" else "a" + ir.smsfilter.core.ComposeIntent.numberKey(address)
+    }
+    // a sms:<number>?body=… link prefills the composer; a saved draft always wins
+    var draft by remember {
+        mutableStateOf(
+            (prefs.getString(draftKey, null)
+                ?: if (threadId > 0) prefs.getString(threadId.toString(), null) else null)
+                .orEmpty().ifEmpty { initialBody.orEmpty() }
+        )
+    }
     var name by remember { mutableStateOf<String?>(null) }
     var menuOpen by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<Sms.Message?>(null) }
@@ -700,13 +718,13 @@ fun ThreadPage(threadId: Long, address: String, learned: Learned? = null, onBack
     }
     LaunchedEffect(draft) {
         delay(400)
-        prefs.edit().putString(threadId.toString(), draft).apply()
+        prefs.edit().putString(draftKey, draft).apply()
     }
 
     fun doSend(text: String, sub: Int?) {
         if (text.isBlank()) return
         draft = ""
-        prefs.edit().remove(threadId.toString()).apply()
+        prefs.edit().remove(draftKey).apply()
         scope.launch {
             withContext(Dispatchers.IO) { Sms.send(ctx, address, text, sub) }
             reload()
@@ -733,9 +751,12 @@ fun ThreadPage(threadId: Long, address: String, learned: Learned? = null, onBack
                     listOfNotNull(
                         if (blocked) "blocked" else null,
                         if (muted) "muted" else null,
-                        // do not print the same string twice when the display name is the number
-                        address.takeIf {
-                            it.isNotBlank() && it != name && Contacts.digits(it) != Contacts.digits(name.orEmpty())
+                        // the number is only worth a subtitle when a real contact name is above it
+                        name?.let { known ->
+                            address.takeIf {
+                                it.isNotBlank() && it != known &&
+                                    Contacts.digits(it) != Contacts.digits(known)
+                            }
                         }
                     ).joinToString(" · "),
                     fontSize = 13.sp,

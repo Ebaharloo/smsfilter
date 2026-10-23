@@ -56,6 +56,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -107,14 +108,39 @@ private fun miuiLight() = lightColorScheme(
     outline = Color(0xFFDADADA)
 )
 
+/** an outside request to write to somebody: address book, a browser `sms:` link, a notification */
+data class ComposeRequest(val address: String, val body: String? = null)
+
 class MainActivity : ComponentActivity() {
+
+    /** consumed by the UI once it has navigated; null = no pending request */
+    private val pending = mutableStateOf<ComposeRequest?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val store = Store.get(this)
         val learned = Learned(this)
         val clf = Classifier(RuleSet.load(this), Model.fromAssets(this), learned)
-        val openAddress = intent?.getStringExtra("address")
-        setContent { App(store, clf, learned, openAddress) }
+        pending.value = requestFrom(intent)
+        setContent { App(store, clf, learned, pending) }
+    }
+
+    /** singleTop: the address book re-delivers the intent to the running instance */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pending.value = requestFrom(intent)
+    }
+
+    private fun requestFrom(intent: Intent?): ComposeRequest? {
+        if (intent == null) return null
+        when (intent.action) {
+            Intent.ACTION_SENDTO, Intent.ACTION_VIEW ->
+                ir.smsfilter.core.ComposeIntent.parse(intent.dataString.orEmpty())?.let { (number, body) ->
+                    if (number.isNotBlank()) return ComposeRequest(number, body)
+                }
+        }
+        return intent.getStringExtra("address")?.takeIf { it.isNotBlank() }?.let { ComposeRequest(it) }
     }
 }
 
@@ -135,19 +161,31 @@ enum class Page(val title: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = null) {
+fun App(
+    store: Store,
+    clf: Classifier,
+    learned: Learned,
+    pending: MutableState<ComposeRequest?> = mutableStateOf(null)
+) {
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences(PREFS, 0) }
     var theme by remember { mutableStateOf(prefs.getString(KEY_THEME, "auto") ?: "auto") }
     var fontScale by remember { mutableStateOf(prefs.getFloat(KEY_FONT, 1.15f)) }
     var page by remember { mutableStateOf(Page.Inbox) }
     var thread by remember { mutableStateOf<Pair<Long, String>?>(null) }  // threadId to address
-    // opened from a notification: jump straight into that conversation
-    LaunchedEffect(openAddress) {
-        if (openAddress != null) {
-            val id = withContext(Dispatchers.IO) { Sms.threadIdFor(ctx, openAddress) }
-            if (id != null) thread = id to openAddress
-        }
+    var composeBody by remember { mutableStateOf<String?>(null) }
+    // opened from the address book / a sms: link / a notification: go straight to that conversation
+    val request = pending.value
+    LaunchedEffect(request) {
+        val req = request ?: return@LaunchedEffect
+        // the lookup must finish before the request is cleared: clearing it first changes this
+        // effect's key and cancels the coroutine, which is how the address-book intent opened the
+        // app on the inbox and did nothing
+        val id = withContext(Dispatchers.IO) { Sms.threadIdFor(ctx, req.address) } ?: -1L
+        page = Page.Inbox
+        composeBody = req.body
+        thread = id to req.address
+        pending.value = null
     }
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -217,7 +255,10 @@ fun App(store: Store, clf: Classifier, learned: Learned, openAddress: String? = 
                                 learned = learned,
                                 store = store
                             )
-                            else ThreadPage(open.first, open.second, learned) { thread = null }
+                            else ThreadPage(open.first, open.second, learned, composeBody) {
+                                thread = null
+                                composeBody = null
+                            }
                         }
                         Page.Archived -> ConversationsPage(
                             onOpenThread = { id, addr -> thread = id to addr },
