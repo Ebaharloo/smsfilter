@@ -184,9 +184,22 @@ fun App(
         val fresh = withContext(Dispatchers.IO) {
             val threads = Sms.threads(ctx)
             val bySuffix = Contacts.namesFor(ctx)
+            // a "name" that is just the number is not a name; both checks used to run per row, per
+            // recomposition, with a regex normalisation each time
+            val names = HashMap<String, String>(threads.size)
+            for (t in threads) {
+                val n = bySuffix[Contacts.suffixOf(t.address)] ?: continue
+                if (Contacts.digits(n) != Contacts.digits(t.address)) names[t.address] = n
+            }
             InboxData(
                 threads = threads,
-                names = threads.associate { it.address to bySuffix[Contacts.suffixOf(it.address)] },
+                names = names,
+                // bidi isolation is real regex work; doing it here keeps it off the scroll path
+                previews = threads.associate {
+                    it.id to ir.smsfilter.core.InboxPolicy.forDisplay(
+                        it.snippet.replace('\n', ' ').trim()
+                    )
+                },
                 pinned = ThreadFlags.pinned(ctx),
                 muted = ThreadFlags.muted(ctx),
                 archived = ThreadFlags.archived(ctx) + ThreadFlags.locallyArchived(ctx),
@@ -263,7 +276,7 @@ fun App(
                         )
                     }
                     Divider(Modifier.padding(vertical = 8.dp))
-                    Text("v0.2 · offline · on-device", style = MaterialTheme.typography.labelSmall,
+                    Text("v0.3 · offline · on-device", style = MaterialTheme.typography.labelSmall,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp))
                 }
             }
@@ -343,6 +356,7 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var rows by remember { mutableStateOf(listOf<Msg>()) }
+    var previews by remember { mutableStateOf(mapOf<Long, String>()) }
     var counts by remember { mutableStateOf(mapOf<Label, Int>()) }
     var query by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
@@ -355,7 +369,10 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
         withContext(Dispatchers.IO) {
             // the page used to cap at 300 while the header showed the true count, so older ads were
             // neither visible nor restorable
-            rows = store.list(Label.SPAM, limit = 2000)
+            val loaded = store.list(Label.SPAM, limit = 2000)
+            rows = loaded
+            // bidi isolation is regex work: do it here, off the scroll path
+            previews = loaded.associate { it.id to InboxPolicy.forDisplay(it.text.replace('\n', ' ')) }
             counts = store.counts()
         }
     }
@@ -468,11 +485,12 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                                 Text(Contacts.displayName(m.sender), fontSize = 17.sp, maxLines = 1,
                                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                                 BodyText(
-                                    m.text.replace('\n', ' '),
+                                    previews[m.id] ?: m.text,
                                     fontSize = 14.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
                                     overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                    preformatted = true,
                                     modifier = Modifier.padding(top = 3.dp)
                                 )
                             }

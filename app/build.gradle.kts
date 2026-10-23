@@ -13,8 +13,8 @@ android {
         applicationId = "ir.smsfilter"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2"
+        versionCode = 3
+        versionName = "0.3"
     }
 
     // single source of truth: the same rules.json the Python mirror reads
@@ -27,6 +27,18 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     testOptions { unitTests.isReturnDefaultValues = true }
+
+    buildTypes {
+        // A debug APK runs Compose with no R8 and no optimisation - that is where the scroll jank
+        // came from. The release variant is the one to install for daily use; it is signed with the
+        // debug key because this app is installed by hand, never through Play.
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
 }
 
 dependencies {

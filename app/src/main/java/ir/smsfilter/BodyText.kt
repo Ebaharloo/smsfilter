@@ -30,10 +30,14 @@ internal fun BodyText(
     lineHeight: TextUnit = TextUnit.Unspecified,
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
+    /** text already went through InboxPolicy.forDisplay (e.g. precomputed off the UI thread) */
+    preformatted: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val farsi = remember(text) { isPersian(text) }
-    val shown = remember(text, farsi) { if (farsi) InboxPolicy.forDisplay(text) else text }
+    val shown = remember(text, farsi, preformatted) {
+        if (farsi && !preformatted) InboxPolicy.forDisplay(text) else text
+    }
     Text(
         shown,
         fontSize = fontSize,

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Regression gate. Run before/after every feature: nothing ships unless this passes.
 #
-#   scripts/gate.sh            # unit rules + filter power + build
+#   scripts/gate.sh            # unit rules + filter power + release build
 #   scripts/gate.sh --install  # ... and push to the phone
 #
 # Layers:
 #   1. :app:testDebugUnitTest  - pure inbox rules (archive, pin order, mute, OTP, links)
 #   2. tools/gate_eval.py      - filter power on real corpora and your own labeled inbox
-#   3. :app:assembleDebug      - the app compiles and packages
+#   3. :app:assembleRelease    - R8-optimised APK, the variant that is installed on the phone
+#      (a debug APK runs Compose unoptimised: ~130 ms median frame vs ~20 ms in release)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -22,10 +23,10 @@ echo "== 1. unit rules"
 echo "== 2. filter power"
 python3 tools/gate_eval.py
 
-echo "== 3. build"
-"$GRADLE" --no-daemon :app:assembleDebug
+echo "== 3. build (release: R8, and the variant you actually install)"
+"$GRADLE" --no-daemon :app:assembleRelease
 
-APK="app/build/outputs/apk/debug/app-debug.apk"
+APK="app/build/outputs/apk/release/app-release.apk"
 echo "APK: $APK ($(stat -c%s "$APK") bytes)"
 
 if [[ "${1:-}" == "--install" ]]; then

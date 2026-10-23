@@ -64,6 +64,10 @@ private fun loadPhoto(ctx: Context, address: String): Bitmap? {
     // alphanumeric senders (.IRANCELL., **bank**) have no number and can never match a contact:
     // skipping the PhoneLookup here saves one provider query per ad row on every scroll
     if (Contacts.digits(address).isEmpty()) return null
+    // and a sender that is not in the address book has no photo either. The cached contact index
+    // answers that without touching the provider, which is what made the first scroll stutter.
+    val suffix = Contacts.suffixOf(address) ?: return null
+    if (suffix !in Contacts.index(ctx).suffixes) return null
     return try {
         val uri = Contacts.photoFor(ctx, address) ?: return null
         ctx.contentResolver.openInputStream(uri)?.use { input ->

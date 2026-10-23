@@ -140,11 +140,7 @@ private fun dayLabel(ts: Long): String {
 private fun Sms.Thread.toRow() = ThreadRow(id, address, snippet, date, unread, outgoing)
 
 /** cached inside Sms: every list row asked, and the raw probe cost a binder call each time */
-@Composable
-private fun multiSim(): Boolean {
-    val ctx = LocalContext.current
-    return remember { Sms.multiSim(ctx) }
-}
+// (kept for callers that need it ad hoc; screens hoist one value and pass it down the rows)
 
 @Composable
 private fun SimBadge(simId: Int, size: Int = 16, fontSize: Int = 9) {
@@ -181,7 +177,9 @@ private fun simLabel(simId: Int): String? {
  */
 data class InboxData(
     val threads: List<Sms.Thread>,
-    val names: Map<String, String?>,
+    val names: Map<String, String>,
+    /** snippet already through InboxPolicy.forDisplay, built off the UI thread */
+    val previews: Map<Long, String>,
     val pinned: Set<Long>,
     val muted: Set<Long>,
     val archived: Set<Long>,
@@ -209,6 +207,9 @@ fun ConversationsPage(
 
     val threads = data?.threads.orEmpty()
     val names = data?.names.orEmpty()
+    val previews = data?.previews.orEmpty()
+    // one binder call for the screen instead of one per row
+    val multiSimOn = remember { Sms.multiSim(ctx) }
     val pinned = data?.pinned.orEmpty()
     val muted = data?.muted.orEmpty()
     val archived = data?.archived.orEmpty()
@@ -368,9 +369,9 @@ fun ConversationsPage(
                         ) {
                             ConversationRow(
                                 row = row,
-                                name = names[row.address]?.takeIf {
-                                    Contacts.digits(it) != Contacts.digits(row.address)
-                                },
+                                name = names[row.address],
+                                preview = previews[row.id] ?: row.snippet,
+                                multiSim = multiSimOn,
                                 pinned = row.id in pinned,
                                 muted = row.id in muted,
                                 selected = selected,
@@ -594,6 +595,8 @@ internal fun SearchPill(
 private fun ConversationRow(
     row: ThreadRow,
     name: String?,
+    preview: String,
+    multiSim: Boolean,
     pinned: Boolean,
     muted: Boolean,
     selected: Boolean,
@@ -621,7 +624,7 @@ private fun ConversationRow(
                         tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp)
                     )
                 }
-                if (multiSim() && simId >= 0) SimBadge(simId, 15, 9)
+                if (multiSim && simId >= 0) SimBadge(simId, 15, 9)
                 Text(
                     name ?: remember(row.address) { Contacts.displayName(row.address) },
                     fontSize = 17.sp,
@@ -635,11 +638,12 @@ private fun ConversationRow(
                     modifier = Modifier.padding(start = 6.dp))
             }
             BodyText(
-                remember(row.snippet) { row.snippet.replace('\n', ' ').trim() },
+                preview,
                 fontSize = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
+                preformatted = true,
                 modifier = Modifier.padding(top = 3.dp)
             )
         }
@@ -718,6 +722,8 @@ fun ThreadPage(
     var sendSim by remember { mutableStateOf<Int?>(null) }
     var chooseSim by remember { mutableStateOf(false) }
     var confirmDeleteThread by remember { mutableStateOf(false) }
+    // one binder call per screen, not one per bubble and per row
+    val multiSimOn = remember { Sms.multiSim(ctx) }
     val listState = rememberLazyListState()
 
     fun reload() = scope.launch {
@@ -805,7 +811,7 @@ fun ThreadPage(
                     maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
             }
-            if (multiSim() && (sendSim ?: -1) >= 0) {
+            if (multiSimOn && (sendSim ?: -1) >= 0) {
                 Row(verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.padding(end = 4.dp)) {
                     SimBadge(sendSim ?: -1, 16, 10)
@@ -956,6 +962,7 @@ fun ThreadPage(
                 Bubble(
                     m = m,
                     grouped = grouped,
+                    multiSim = multiSimOn,
                     onLongPress = { selected = m },
                     onUrl = { url -> openUrl(ctx, url) },
                     onCall = { number -> dial(ctx, number) },
@@ -994,7 +1001,7 @@ fun ThreadPage(
                             inner()
                         }
                     )
-                    if (multiSim()) {
+                    if (multiSimOn) {
                         Box(
                             Modifier.padding(start = 8.dp).size(24.dp).clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.background)
@@ -1146,6 +1153,7 @@ fun ThreadPage(
 private fun Bubble(
     m: Sms.Message,
     grouped: Boolean,
+    multiSim: Boolean,
     onLongPress: () -> Unit,
     onUrl: (String) -> Unit,
     onCall: (String) -> Unit,
@@ -1164,7 +1172,7 @@ private fun Bubble(
             horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
             Row(verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) {
-                if (multiSim()) SimBadge(m.simId)
+                if (multiSim) SimBadge(m.simId)
                 Text(stampFmt.format(Date(m.date)), fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
