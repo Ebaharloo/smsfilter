@@ -172,8 +172,27 @@ private fun simLabel(simId: Int): String? {
     return remember(simId) { Sms.simLabel(ctx, simId) }
 }
 
+/**
+ * Everything the conversation list needs, loaded as one snapshot.
+ *
+ * Loading it field by field used to repaint the list several times per open: the archive page first
+ * appeared with an empty archive set ("jumps between inbox and archive"), and each page ran its own
+ * 5,000-row provider scan plus contacts query on every switch.
+ */
+data class InboxData(
+    val threads: List<Sms.Thread>,
+    val names: Map<String, String?>,
+    val pinned: Set<Long>,
+    val muted: Set<Long>,
+    val archived: Set<Long>,
+    val spam: Set<Long>,
+    val contactSuffixes: Set<String>
+)
+
 @Composable
 fun ConversationsPage(
+    data: InboxData?,
+    onReload: () -> Unit,
     onOpenThread: (Long, String) -> Unit,
     archivedMode: Boolean = false,
     learned: Learned? = null,
@@ -181,41 +200,24 @@ fun ConversationsPage(
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    var threads by remember { mutableStateOf(listOf<Sms.Thread>()) }
-    var names by remember { mutableStateOf(mapOf<String, String?>()) }
-    var pinned by remember { mutableStateOf(setOf<Long>()) }
-    var muted by remember { mutableStateOf(setOf<Long>()) }
-    var archived by remember { mutableStateOf(setOf<Long>()) }
     var query by remember { mutableStateOf("") }
     var tab by remember { mutableStateOf(Tab.ALL) }
-    var reload by remember { mutableStateOf(0) }
     var selection by remember { mutableStateOf(setOf<Long>()) }
     var newMessage by remember { mutableStateOf(false) }
-    var simByThread by remember { mutableStateOf(mapOf<Long, Int>()) }
-    var contactSuffixes by remember { mutableStateOf(setOf<String>()) }
-    var spamIds by remember { mutableStateOf(setOf<Long>()) }
     val snack = remember { SnackbarHostState() }
 
-    LaunchedEffect(reload) {
-        val loaded = withContext(Dispatchers.IO) { Sms.threads(ctx) }
-        threads = loaded
-        pinned = ThreadFlags.pinned(ctx)
-        muted = ThreadFlags.muted(ctx)
-        archived = withContext(Dispatchers.IO) {
-            ThreadFlags.archived(ctx) + ThreadFlags.locallyArchived(ctx)
-        }
-        simByThread = loaded.associate { it.id to it.simId }
-        contactSuffixes = withContext(Dispatchers.IO) { Contacts.suffixes(ctx) }
-        spamIds = ThreadFlags.spamThreads(ctx)
-        names = withContext(Dispatchers.IO) {
-            val bySuffix = Contacts.namesFor(ctx)
-            loaded.associate { it.address to bySuffix[Contacts.suffixOf(it.address)] }
-        }
-    }
+    val threads = data?.threads.orEmpty()
+    val names = data?.names.orEmpty()
+    val pinned = data?.pinned.orEmpty()
+    val muted = data?.muted.orEmpty()
+    val archived = data?.archived.orEmpty()
+    val spamIds = data?.spam.orEmpty()
+    val contactSuffixes = data?.contactSuffixes.orEmpty()
+    val simByThread = remember(threads) { threads.associate { it.id to it.simId } }
 
     // list rules stay in InboxPolicy so they are unit-tested without Android. Memoized: this used
     // to re-group, re-filter and re-count every conversation on each keystroke and reload.
-    val ordered = remember(threads, archived, archivedMode, query, names, spamIds, pinned) {
+    val ordered = remember(data, archivedMode, query, pinned) {
         InboxPolicy.order(
             InboxPolicy.visible(threads.map { it.toRow() }, archived, archivedMode, query, names, spamIds),
             pinned
@@ -230,7 +232,7 @@ fun ConversationsPage(
         val target = !archivedMode
         withContext(Dispatchers.IO) { ThreadFlags.setArchived(ctx, ids, target) }
         selection = emptySet()
-        reload++
+        onReload()
         // Google Messages gives an undo for archive; without one a mis-swipe is permanent
         val result = snack.showSnackbar(
             message = if (target) "Conversation archived" else "Moved back to inbox",
@@ -239,7 +241,7 @@ fun ConversationsPage(
         )
         if (result == SnackbarResult.ActionPerformed) {
             withContext(Dispatchers.IO) { ThreadFlags.setArchived(ctx, ids, !target) }
-            reload++
+            onReload()
         }
     }
 
@@ -248,25 +250,25 @@ fun ConversationsPage(
         withContext(Dispatchers.IO) {
             AdActions.markAd(ctx, store, learned, row.address, row.snippet, row.date, row.id)
         }
-        reload++
+        onReload()
         snack.showSnackbar("Moved to Ads — the filter learned from it")
     }
 
     fun toggleRead(row: ThreadRow) = scope.launch {
         withContext(Dispatchers.IO) { Sms.setThreadRead(ctx, row.id, row.unread == 0) }
-        reload++
+        onReload()
     }
 
     fun deleteThreads(ids: Set<Long>) = scope.launch {
         withContext(Dispatchers.IO) { ids.forEach { Sms.deleteThread(ctx, it) } }
         selection = emptySet()
-        reload++
+        onReload()
     }
 
     fun markRead(ids: Set<Long>) = scope.launch {
         withContext(Dispatchers.IO) { ids.forEach { Sms.markThreadRead(ctx, it) } }
         selection = emptySet()
-        reload++
+        onReload()
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -315,7 +317,14 @@ fun ConversationsPage(
                 }
             }
 
-            if (shown.isEmpty()) {
+            if (data == null) {
+                // first load: say so instead of claiming the archive is empty
+                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Loading…", style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else if (shown.isEmpty()) {
                 Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(

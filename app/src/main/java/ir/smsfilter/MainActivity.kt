@@ -60,6 +60,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -173,6 +174,25 @@ fun App(
     var fontScale by remember { mutableStateOf(prefs.getFloat(KEY_FONT, 1.15f)) }
     var page by remember { mutableStateOf(Page.Inbox) }
     var thread by remember { mutableStateOf<Pair<Long, String>?>(null) }  // threadId to address
+    // one snapshot for both list pages: switching Inbox <-> Archive must not re-query the provider
+    var inbox by remember { mutableStateOf<InboxData?>(null) }
+    var reload by remember { mutableIntStateOf(0) }
+    LaunchedEffect(reload) {
+        val fresh = withContext(Dispatchers.IO) {
+            val threads = Sms.threads(ctx)
+            val bySuffix = Contacts.namesFor(ctx)
+            InboxData(
+                threads = threads,
+                names = threads.associate { it.address to bySuffix[Contacts.suffixOf(it.address)] },
+                pinned = ThreadFlags.pinned(ctx),
+                muted = ThreadFlags.muted(ctx),
+                archived = ThreadFlags.archived(ctx) + ThreadFlags.locallyArchived(ctx),
+                spam = ThreadFlags.spamThreads(ctx),
+                contactSuffixes = Contacts.suffixes(ctx)
+            )
+        }
+        inbox = fresh
+    }
     var composeBody by remember { mutableStateOf<String?>(null) }
     // opened from the address book / a sms: link / a notification: go straight to that conversation
     val request = pending.value
@@ -218,8 +238,9 @@ fun App(
                             label = { Text(p.title) },
                             selected = page == p,
                             onClick = {
-                                page = p
-                                scope.launch { drawer.close() }
+                                // switch after the drawer is gone: changing the page mid-animation
+                                // looked like the content was jumping between inbox and archive
+                                scope.launch { drawer.close(); page = p }
                             },
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
                         )
@@ -251,6 +272,8 @@ fun App(
                         Page.Inbox -> {
                             val open = thread
                             if (open == null) ConversationsPage(
+                                data = inbox,
+                                onReload = { reload++ },
                                 onOpenThread = { id, addr -> thread = id to addr },
                                 learned = learned,
                                 store = store
@@ -258,9 +281,12 @@ fun App(
                             else ThreadPage(open.first, open.second, learned, composeBody) {
                                 thread = null
                                 composeBody = null
+                                reload++      // read state / spam marks may have changed
                             }
                         }
                         Page.Archived -> ConversationsPage(
+                            data = inbox,
+                            onReload = { reload++ },
                             onOpenThread = { id, addr -> thread = id to addr },
                             archivedMode = true,
                             learned = learned,
