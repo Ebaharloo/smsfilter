@@ -55,6 +55,17 @@ export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 so UI work cannot silently weaken the filter. `tools/mirror.py` runs the same rules and weights on the
 host in Python for fast tuning; it must agree with the Kotlin model.
 
+## Credits and inspiration
+
+- **Original idea:** *FilterSMS* — the concept this project grew out of.
+- **Launcher icon:** [Papirus icon theme](https://www.opendesktop.org/p/1662847/) (the artwork is used as supplied,
+  transparent, and adapted to Android's icon layers).
+- **UI inspiration:** Xiaomi's Messages app (`com.android.mms`). Its layout metrics (row height, type scale, badge
+  shapes) and feature set were studied from the APK; no assets, strings or code were copied.
+- **Built with:** [Hermes Agent](https://hermes-agent.nousresearch.com) by
+  [Nous Research](https://nousresearch.com) — the agent wrote the classifier, the Kotlin/Compose messenger, the
+  test gates and the tooling in this repository, pair-programmed with me.
+
 ## Notes and limits
 
 - Personal project, Persian/Iranian SMS patterns. Not on Google Play (READ_SMS is restricted there).
