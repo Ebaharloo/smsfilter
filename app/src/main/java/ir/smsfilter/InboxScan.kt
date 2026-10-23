@@ -17,6 +17,8 @@ object InboxScan {
 
     data class Result(val scanned: Int, val spam: Int, val threads: Int)
 
+    data class Recheck(val scanned: Int, val restored: Int, val threads: Int)
+
     fun run(
         ctx: Context,
         clf: Classifier,
@@ -75,5 +77,37 @@ object InboxScan {
         ThreadFlags.setArchived(ctx, threads, true)
         threads.forEach { Sms.markThreadRead(ctx, it) }
         return Result(scanned = scanned, spam = spam, threads = threads.size)
+    }
+
+    /**
+     * Re-judge everything already on the Ads page with the current rules and model.
+     *
+     * Rules improve, and a message filtered last week can be an order confirmation the filter no
+     * longer hides. Instead of restoring hundreds of rows by hand, this re-runs the classifier over
+     * the stored copies and moves the ones that are no longer spam back to the inbox.
+     */
+    fun recheck(ctx: Context, clf: Classifier, store: Store, limit: Int = 3000): Recheck {
+        val contacts = Contacts.suffixes(ctx)
+        val rows = try {
+            store.list(Label.SPAM, limit)
+        } catch (t: Throwable) {
+            return Recheck(0, 0, 0)
+        }
+        val threads = HashSet<Long>()
+        var restored = 0
+        rows.forEach { m ->
+            val v = try {
+                clf.classify(m.text, m.sender, contacts)
+            } catch (t: Throwable) {
+                null
+            } ?: return@forEach
+            if (v.label == Label.SPAM) return@forEach
+            store.relabelCopies(m.sender, m.text, Label.IMPORTANT)
+            Sms.insertInbox(ctx, m.sender, m.text, m.ts)
+            Sms.threadIdFor(ctx, m.sender)?.let { tid -> threads += tid }
+            restored++
+        }
+        ThreadFlags.restore(ctx, threads)
+        return Recheck(rows.size, restored, threads.size)
     }
 }

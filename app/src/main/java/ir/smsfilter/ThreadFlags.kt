@@ -110,6 +110,11 @@ object ThreadFlags {
         Sms.markThreadRead(ctx, threadId)
     }
 
+    /** same as [restore] for a whole batch */
+    fun restore(ctx: Context, threadIds: Set<Long>) {
+        threadIds.forEach { restore(ctx, it) }
+    }
+
     /** "not an ad": clear both marks - un-archiving alone returned it to Archive, not the inbox */
     fun restore(ctx: Context, threadId: Long) {
         if (threadId <= 0) return

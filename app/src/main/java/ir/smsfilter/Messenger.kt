@@ -110,10 +110,7 @@ private val dayFmt = SimpleDateFormat("dd MMM", Locale.US)
 private val fullFmt = SimpleDateFormat("yyyy/MM/dd", Locale.US)
 private val stampFmt = SimpleDateFormat("d MMM HH:mm", Locale.US)
 
-/** MIUI badge / dot colours, independent of the accent */
-private val BADGE_GREY = Color(0xFF4A4A4A)
 private val FAB_AMBER = Color(0xFFFFB300)
-private val SIM_BADGE = Color(0xFF2E7DFF)
 
 
 private fun timeLabel(ts: Long): String {
@@ -153,13 +150,13 @@ private fun multiSim(): Boolean {
 private fun SimBadge(simId: Int, size: Int = 16, fontSize: Int = 9) {
     val label = simLabel(simId) ?: return
     Box(
-        Modifier.size(size.dp).clip(CircleShape).background(SIM_BADGE),
+        // a muted chip: which SIM carried a message is context, not something to shout about
+        Modifier.size(size.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
         contentAlignment = Alignment.Center
     ) {
-        // font padding sits below the baseline and pushes the digit off-centre in a small circle
         Text(
             label,
-            color = Color.White,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = fontSize.sp,
             lineHeight = fontSize.sp,
             fontWeight = FontWeight.Bold,
@@ -593,17 +590,22 @@ private fun ConversationRow(
         Avatar(row.address, 40.dp, 14, neutral = true)
         Column(Modifier.weight(1f).padding(start = 12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (pinned) Icon(
-                    Icons.Filled.Star, contentDescription = "pinned",
-                    tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp)
-                )
+                // the star slot is always reserved: drawing it only on pinned rows shifted every name
+                // on those rows out of column with the rest of the list
+                Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+                    if (pinned) Icon(
+                        Icons.Filled.Star, contentDescription = "pinned",
+                        tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp)
+                    )
+                }
+                if (multiSim() && simId >= 0) SimBadge(simId, 15, 9)
                 Text(
                     name ?: remember(row.address) { Contacts.displayName(row.address) },
                     fontSize = 17.sp,
                     fontWeight = if (row.unread > 0) FontWeight.SemiBold else FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).padding(start = if (pinned) 6.dp else 0.dp)
+                    modifier = Modifier.weight(1f).padding(start = 5.dp)
                 )
                 if (muted) Text("muted", fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -613,16 +615,10 @@ private fun ConversationRow(
                 remember(row.snippet) { row.snippet.replace('\n', ' ').trim() },
                 fontSize = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 3.dp)
             )
-            // which SIM the newest message of this thread arrived on
-            if (multiSim() && simId >= 0) {
-                Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    SimBadge(simId)
-                }
-            }
         }
         // time above the badge, both flush right: the preview never runs under them
         Column(
@@ -637,11 +633,20 @@ private fun ConversationRow(
             if (row.unread > 0) {
                 Box(
                     Modifier.padding(top = 6.dp).height(18.dp).widthIn(min = 18.dp)
-                        .clip(RoundedCornerShape(5.dp)).background(BADGE_GREY),
+                        .clip(RoundedCornerShape(9.dp)).background(MaterialTheme.colorScheme.primary),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("${row.unread}", color = Color.White, fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 4.dp))
+                    // includeFontPadding=false + lineHeight == fontSize: otherwise the digits sit low
+                    // in an 18dp pill (the "number in the middle is not in the correct position" bug)
+                    Text(
+                        "${row.unread}",
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        fontSize = 11.sp,
+                        lineHeight = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        style = TextStyle(platformStyle = PlatformTextStyle(includeFontPadding = false)),
+                        modifier = Modifier.padding(horizontal = 5.dp)
+                    )
                 }
             }
         }

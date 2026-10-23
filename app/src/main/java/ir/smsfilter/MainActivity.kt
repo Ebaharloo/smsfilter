@@ -304,6 +304,7 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
     var query by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
+    var confirmRecheck by remember { mutableStateOf(false) }
     var open by remember { mutableStateOf<Msg?>(null) }
     val snack = remember { SnackbarHostState() }
 
@@ -356,6 +357,10 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                                     )
                                 }
                             }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Re-check with current filter") },
+                            onClick = { menuOpen = false; confirmRecheck = true }
                         )
                         DropdownMenuItem(text = { Text("Delete all ads") },
                             onClick = { menuOpen = false; confirmClear = true })
@@ -449,6 +454,39 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                 }) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } }
+        )
+    }
+
+    if (confirmRecheck) {
+        AlertDialog(
+            onDismissRequest = { confirmRecheck = false },
+            title = { Text("Re-check the ads page?") },
+            text = {
+                Text(
+                    "Runs the current rules over the ${rows.size} messages kept here. " +
+                        "Anything that no longer looks like an ad comes back to the inbox; " +
+                        "nothing is deleted."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRecheck = false
+                    scope.launch {
+                        val res = withContext(Dispatchers.IO) {
+                            InboxScan.recheck(
+                                ctx,
+                                Classifier(RuleSet.load(ctx), Model.fromAssets(ctx), learned),
+                                store
+                            )
+                        }
+                        refresh()
+                        snack.showSnackbar(
+                            "re-checked ${res.scanned} · moved ${res.restored} back to the inbox"
+                        )
+                    }
+                }) { Text("Re-check") }
+            },
+            dismissButton = { TextButton(onClick = { confirmRecheck = false }) { Text("Cancel") } }
         )
     }
 
