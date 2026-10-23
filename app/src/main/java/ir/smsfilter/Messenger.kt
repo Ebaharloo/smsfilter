@@ -302,7 +302,9 @@ fun ConversationsPage(
                 // scrollable tab bar: full names, underline indicator, no chip styling
                 ScrollableTabRow(
                     selectedTabIndex = Tab.entries.indexOf(tab),
-                    edgePadding = 0.dp,
+                    // 16dp of trailing room: with four counted tabs the last label landed exactly
+                    // on the screen edge and clipped ("Pro...")
+                    edgePadding = 16.dp,
                     containerColor = MaterialTheme.colorScheme.background,
                     contentColor = MaterialTheme.colorScheme.primary
                 ) {
