@@ -39,7 +39,11 @@ object AdActions {
         store.relabelCopies(m.sender, m.text, Label.IMPORTANT)
         learned.markImportant(m.sender)
         learned.allow(m.sender)
-        Sms.insertInbox(ctx, m.sender, m.text, m.ts)
-        Sms.threadIdFor(ctx, m.sender)?.let { ThreadFlags.restore(ctx, it) }
+        val rowId = Sms.insertInbox(ctx, m.sender, m.text, m.ts)
+        // the row we just wrote knows its own thread; resolving by number can land on a sibling
+        // thread when the same number exists under two spellings, and then the restored message
+        // stays archived in the thread it actually went to
+        (Sms.threadIdOfMessage(ctx, rowId) ?: Sms.threadIdFor(ctx, m.sender))
+            ?.let { ThreadFlags.restore(ctx, it) }
     }
 }

@@ -114,12 +114,14 @@ object Sms {
                 Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE
             ) + if (simCol.isNotEmpty()) listOf(simCol) else emptyList()
         ).toTypedArray()
+        // newest first and stop at the window: a bank thread can hold thousands of messages and the
+        // UI only ever shows the newest ~800, so reading the whole thread was pure latency
         try {
             ctx.contentResolver.query(
                 Telephony.Sms.CONTENT_URI, proj, "${Telephony.Sms.THREAD_ID}=?",
-                arrayOf(threadId.toString()), "${Telephony.Sms.DATE} ASC"
+                arrayOf(threadId.toString()), "${Telephony.Sms.DATE} DESC, ${Telephony.Sms._ID} DESC"
             )?.use { c ->
-                while (c.moveToNext()) {
+                while (out.size < window && c.moveToNext()) {
                     out += Message(
                         id = c.getLong(0),
                         threadId = c.getLong(1),
@@ -133,21 +135,35 @@ object Sms {
             }
         } catch (t: Throwable) {
         }
-        // a bank thread can hold thousands of messages; the newest window is all the UI shows
-        return if (out.size > window) out.subList(out.size - window, out.size).toList() else out
+        out.reverse()   // back to oldest-first, which is how bubbles are drawn
+        return out
     }
 
     /**
      * thread id for a number, asked of the provider directly - no inbox-wide grouping.
-     * The second pass compares national digits, because the address book hands us +989121234567
-     * while the provider may hold 09121234567; comparing raw 9-digit tails missed that and opened a
-     * duplicate conversation.
+     * The provider may hold 09121234567 while the address book hands us +98912****4567, so the
+     * lookup asks for every spelling of the number in one indexed query instead of grouping the
+     * inbox. A row-by-row tail match is the last resort for spellings we cannot enumerate
+     * (separators, odd prefixes) and only runs when the indexed query missed.
      */
     fun threadIdFor(ctx: Context, address: String): Long? {
+        if (address.isBlank()) return null
+        // exact spelling first: the same number can live in two threads when it was written with a
+        // trailing space or another prefix, and only this spelling's thread is the one the message
+        // actually sits in (mute flags and restores must act on that one)
         try {
             ctx.contentResolver.query(
                 Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms.THREAD_ID), "${Telephony.Sms.ADDRESS}=?",
-                arrayOf(address), null
+                arrayOf(address), "${Telephony.Sms.DATE} DESC"
+            )?.use { c -> if (c.moveToFirst()) return c.getLong(0) }
+        } catch (t: Throwable) {
+        }
+        val forms = numberForms(address)
+        try {
+            ctx.contentResolver.query(
+                Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms.THREAD_ID),
+                "${Telephony.Sms.ADDRESS} IN (${forms.joinToString(",") { "?" }})",
+                forms.toTypedArray(), "${Telephony.Sms.DATE} DESC"
             )?.use { c -> if (c.moveToFirst()) return c.getLong(0) }
         } catch (t: Throwable) {
         }
@@ -155,7 +171,7 @@ object Sms {
         try {
             ctx.contentResolver.query(
                 Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS),
-                null, null, null
+                null, null, "${Telephony.Sms.DATE} DESC"
             )?.use { c ->
                 while (c.moveToNext()) {
                     if (ir.smsfilter.core.ComposeIntent.sameNumber(c.getString(1).orEmpty(), address)) {
@@ -166,6 +182,23 @@ object Sms {
         } catch (t: Throwable) {
         }
         return null
+    }
+
+    /** every way this number can be written in the provider, for one indexed lookup */
+    private fun numberForms(address: String): List<String> {
+        val key = ir.smsfilter.core.ComposeIntent.numberKey(address)
+        return (ir.smsfilter.core.ComposeIntent.lookupVariants(address) +
+            if (key.length == 10) listOf("98$key", "0098$key") else emptyList()).distinct()
+    }
+
+    /** the thread a specific provider row belongs to - exact, no number-guessing */
+    fun threadIdOfMessage(ctx: Context, messageId: Long): Long? = try {
+        ctx.contentResolver.query(
+            Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms.THREAD_ID), "${Telephony.Sms._ID}=?",
+            arrayOf(messageId.toString()), null
+        )?.use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+    } catch (t: Throwable) {
+        null
     }
 
     fun setThreadRead(ctx: Context, threadId: Long, read: Boolean) {

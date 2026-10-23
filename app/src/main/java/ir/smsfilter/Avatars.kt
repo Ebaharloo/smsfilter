@@ -60,14 +60,19 @@ fun initialsOf(address: String): String {
     }
 }
 
-private fun loadPhoto(ctx: Context, address: String): Bitmap? = try {
-    val uri = Contacts.photoFor(ctx, address) ?: return null
-    ctx.contentResolver.openInputStream(uri)?.use { input ->
-        val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-        BitmapFactory.decodeStream(input, null, opts)
+private fun loadPhoto(ctx: Context, address: String): Bitmap? {
+    // alphanumeric senders (.IRANCELL., **bank**) have no number and can never match a contact:
+    // skipping the PhoneLookup here saves one provider query per ad row on every scroll
+    if (Contacts.digits(address).isEmpty()) return null
+    return try {
+        val uri = Contacts.photoFor(ctx, address) ?: return null
+        ctx.contentResolver.openInputStream(uri)?.use { input ->
+            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+            BitmapFactory.decodeStream(input, null, opts)
+        }
+    } catch (t: Throwable) {
+        null
     }
-} catch (t: Throwable) {
-    null
 }
 
 @Composable

@@ -45,31 +45,25 @@ object Contacts {
     }
 
 
-    fun suffixes(ctx: Context): Set<String> {
-        val out = HashSet<String>(512)
-        try {
-            ctx.contentResolver.query(
-                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
-                null, null, null
-            )?.use { c ->
-                while (c.moveToNext()) {
-                    digits(c.getString(0).orEmpty()).takeLast(9)
-                        .takeIf { it.length == 9 }?.let { out += it }
-                }
-            }
-        } catch (t: Throwable) {
-            // no permission or provider trouble: behave as if the address book were empty
-        }
-        return out
-    }
+    /** names by suffix + the suffix set the filter uses, from a single provider sweep */
+    data class Index(val names: Map<String, String>, val suffixes: Set<String>)
+
+    @Volatile private var indexCache: Pair<Long, Index>? = null
 
     /**
-     * Names for a whole inbox in one provider query, keyed by the same last-9-digit suffix the
-     * filter uses. Asking per row meant ~150 content queries on every list load.
+     * One pass over the address book, cached for a minute.
+     *
+     * Callers used to run two separate sweeps per inbox load (names, then suffixes), and the receive
+     * path asked for the suffix set on every single message. Contacts change slowly; a stale minute
+     * is cheaper than a full `Phone.CONTENT_URI` scan 50 times an hour.
      */
-    fun namesFor(ctx: Context): Map<String, String> {
-        val out = HashMap<String, String>(512)
+    fun index(ctx: Context): Index {
+        val now = android.os.SystemClock.elapsedRealtime()
+        indexCache?.let { if (now - it.first < 60_000) return it.second }
+        val names = HashMap<String, String>(512)
+        val suffixes = HashSet<String>(512)
+        var failed = false
+        var opened = false
         try {
             ctx.contentResolver.query(
                 ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
@@ -79,17 +73,35 @@ object Contacts {
                 ),
                 null, null, null
             )?.use { c ->
+                opened = true
                 while (c.moveToNext()) {
                     val name = c.getString(0)?.trim().orEmpty()
                     val suffix = digits(c.getString(1).orEmpty()).takeLast(9)
-                    if (name.isNotEmpty() && suffix.length == 9) out.putIfAbsent(suffix, name)
+                    if (suffix.length != 9) continue
+                    suffixes += suffix
+                    if (name.isNotEmpty()) names.putIfAbsent(suffix, name)
                 }
             }
         } catch (t: Throwable) {
-            return emptyMap()
+            // no permission or provider trouble: behave as if the address book were empty
+            failed = true
         }
-        return out
+        val fresh = Index(names, suffixes)
+        // a failed sweep (boot, provider busy, permission glitch) must not be cached: the receive
+        // path would then treat saved contacts as unknown for a whole minute, and their messages
+        // would be filtered out of the inbox instead of passing the contact guard
+        if (failed || !opened) return fresh
+        indexCache = now to fresh
+        return fresh
     }
+
+    fun suffixes(ctx: Context): Set<String> = index(ctx).suffixes
+
+    /**
+     * Names for a whole inbox in one provider query, keyed by the same last-9-digit suffix the
+     * filter uses. Asking per row meant ~150 content queries on every list load.
+     */
+    fun namesFor(ctx: Context): Map<String, String> = index(ctx).names
 
     /** digits only, Persian/Arabic digits folded to ASCII first */
     fun digits(raw: String): String {
