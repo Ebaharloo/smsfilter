@@ -51,4 +51,65 @@ class GoldenTest {
         assertEquals("بانک ملی", Normalizer.normalize("بانك ملى"))
         assertEquals("وام", Normalizer.squash(Normalizer.normalize("و ا م")))
     }
+
+    /** what the user's taps contribute, without Android */
+    private class FakeLearned(
+        private val hits: Int,
+        private val blockedSenders: Set<String> = emptySet(),
+        private val allowedSenders: Set<String> = emptySet()
+    ) : LearnedSignals {
+        override fun adWordHits(normNoSpaces: String) = hits
+        override fun blocked() = blockedSenders
+        override fun allowed() = allowedSenders
+    }
+
+    /**
+     * Real failure: a DIGIKALA delivery notice («کد تحویل … مامور ارسال») scored SPAM 80 because the
+     * 9 ad words learned from DIGIKALA promo taps are also delivery vocabulary. Learned words must not
+     * outvote a guard hit.
+     */
+    @Test
+    fun learnedAdWordsDoNotOverrideTheGuard() {
+        val delivery = "کاربر نمونه عزیز!\nسفارشتون تا چند ساعت آینده به دستتون می‌رسه. " +
+            "کد تحویل رو در زمان دریافت سفارش به مامور ارسال دیجی‌کالا اعلام کنید."
+        val v = Classifier(rules, model, FakeLearned(9)).classify(delivery, "DIGIKALA")
+        assertEquals(Label.IMPORTANT, v.label)
+        assertTrue(v.why.any { it.startsWith("guard:") })
+    }
+
+    /** the same learned words must still catch a real promo that trips no guard */
+    @Test
+    fun learnedAdWordsStillFilterUnguardedAds() {
+        val promo = "🔥تخفیف ویژه تا ۴۰٪\njanebi.com/a08\nلغو۱۱"
+        assertEquals(Label.SPAM, Classifier(rules, model, FakeLearned(9)).classify(promo, "+989120000000").label)
+    }
+
+    /**
+     * One sender does both. Restoring a message from DIGIKALA must stop sender reputation from
+     * filtering them, but it must NOT let DIGIKALA ads through - content still decides.
+     */
+    @Test
+    fun allowlistedSenderStillLosesWhenTheContentIsAnAd() {
+        val learned = FakeLearned(9, blockedSenders = setOf("DIGIKALA"), allowedSenders = setOf("DIGIKALA"))
+        val ad = "تخفیف ویژه janebi.com/a08 لغو۱۱"
+        assertEquals(Label.SPAM, Classifier(rules, model, learned).classify(ad, "DIGIKALA").label)
+    }
+
+    /** ...and the order/delivery notice from that same sender comes back to the inbox */
+    @Test
+    fun allowlistedSenderKeepsOrderNotices() {
+        val learned = FakeLearned(9, allowedSenders = setOf("DIGIKALA"))
+        val delivery = "سفارش شما ۵۰۷۵۳۸ آماده تحویل است، کد تحویل ۴۹۴۲ به مامور ارسال بگویید."
+        val v = Classifier(rules, model, learned).classify(delivery, "DIGIKALA")
+        assertEquals(Label.IMPORTANT, v.label)
+        assertTrue(v.why.any { it.startsWith("guard:") })
+    }
+
+    /** reputation alone never filters: a plain notice from a sender the user once marked is kept */
+    @Test
+    fun senderReputationAloneDoesNotFilter() {
+        val learned = FakeLearned(9, blockedSenders = setOf("SNAPP"))
+        val notice = "سفارش شما ثبت شد و در حال آماده‌سازی است."
+        assertEquals(Label.IMPORTANT, Classifier(rules, model, learned).classify(notice, "SNAPP").label)
+    }
 }

@@ -24,6 +24,8 @@ object InboxScan {
         limit: Int = 4000
     ): Result {
         val contacts = Contacts.suffixes(ctx)
+        // senders the user restored by hand are never re-filtered, not even by a manual scan
+        val allowed = Learned(ctx).allowed()
         val threads = HashSet<Long>()
         var scanned = 0
         var spam = 0
@@ -47,6 +49,7 @@ object InboxScan {
                     val suffix = Contacts.digits(address).takeLast(9)
                     // a saved contact is protected from content filtering, same as the live path
                     if (suffix.length == 9 && suffix in contacts) continue
+                    if (address in allowed) continue
 
                     val verdict = try {
                         clf.classify(body, address, contacts)

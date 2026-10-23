@@ -27,10 +27,18 @@ object AdActions {
         if (tid > 0) ThreadFlags.quarantine(ctx, tid)
     }
 
-    /** "not an ad": back into the inbox, tap tally cleared, no longer archived or spam-marked */
+    /**
+     * "not an ad": back into the inbox for good.
+     *
+     * Three things have to happen or the message returns to the Ads page: every stored copy is
+     * relabelled (not just the row that was tapped), the sender is put on the user allowlist so the
+     * classifier never filters them again, and the thread is resolved *after* the insert because a
+     * sender with no conversation yet only gets a thread when the message is written.
+     */
     fun restore(ctx: Context, store: Store, learned: Learned, m: Msg) {
-        store.relabel(m.id, Label.IMPORTANT)
+        store.relabelCopies(m.sender, m.text, Label.IMPORTANT)
         learned.markImportant(m.sender)
+        learned.allow(m.sender)
         Sms.insertInbox(ctx, m.sender, m.text, m.ts)
         Sms.threadIdFor(ctx, m.sender)?.let { ThreadFlags.restore(ctx, it) }
     }

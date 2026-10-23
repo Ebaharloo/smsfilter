@@ -40,6 +40,9 @@ class RuleSet(json: JSONObject) {
     val spacedWeight = st.getInt("spaced_letters_weight")
     val unknownSenderWeight = st.getInt("unknown_sender_weight")
 
+    /** order / delivery / payment notices: protected only when the message has no marketing markers */
+    val transactional: List<String> = json.getJSONObject("transactional").getJSONArray("terms").strings()
+
     private val th = json.getJSONObject("thresholds")
     val thrSpam = th.getInt("spam")
     val thrUnsure = th.getInt("unsure")

@@ -10,7 +10,22 @@ import android.content.Context
  * Learned ad phrases may override the SOFT guard (bank/telco-ish wording); they never override
  * the hard guard (OTP, transaction confirmations, government).
  */
-class Learned(ctx: Context) {
+/**
+ * What the classifier needs from the user's taps. An interface so the filter logic can be unit
+ * tested without Android (see GoldenTest).
+ */
+interface LearnedSignals {
+    /** how many learned ad words this message contains */
+    fun adWordHits(normNoSpaces: String): Int
+
+    /** senders the user tapped "this is an ad" on twice */
+    fun blocked(): Set<String>
+
+    /** senders the user explicitly restored from the Ads page: never filter them again */
+    fun allowed(): Set<String>
+}
+
+class Learned(ctx: Context) : LearnedSignals {
 
     private val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -18,7 +33,9 @@ class Learned(ctx: Context) {
     val adWords: Set<String>
         get() = p.getStringSet(KEY_WORDS, emptySet()) ?: emptySet()
 
+    /** "this is an ad": the sender is no longer trusted, whatever was restored earlier */
     fun markAd(sender: String, text: String) {
+        unallow(sender)
         val words = text.split(Regex("[^\\p{L}\\p{N}]+"))
             .map { Normalizer.normalize(it).replace(" ", "") }
             .filter { it.length >= 4 && it !in STOP }
@@ -41,16 +58,33 @@ class Learned(ctx: Context) {
         p.edit().putStringSet(KEY_BLOCKED, b).apply()
     }
 
-    fun blocked(): Set<String> = p.getStringSet(KEY_BLOCKED, emptySet()) ?: emptySet()
+    override fun blocked(): Set<String> = p.getStringSet(KEY_BLOCKED, emptySet()) ?: emptySet()
 
-    /** how many learned ad words this message contains */
-    fun adWordHits(normNoSpaces: String): Int = adWords.count { it in normNoSpaces }
+    override fun adWordHits(normNoSpaces: String): Int = adWords.count { it in normNoSpaces }
+
+    /**
+     * Restoring a message from the Ads page means "this was never an ad": allow the sender so the
+     * next message from them is not filtered again. Restore alone used to only clear the row, and the
+     * learned words kept pulling every later message from that sender straight back into Ads.
+     */
+    override fun allowed(): Set<String> = p.getStringSet(KEY_ALLOWED, emptySet()) ?: emptySet()
+
+    fun allow(sender: String) {
+        if (sender.isBlank()) return
+        p.edit().putStringSet(KEY_ALLOWED, allowed() + sender).apply()
+    }
+
+    fun unallow(sender: String) {
+        val now = allowed()
+        if (sender in now) p.edit().putStringSet(KEY_ALLOWED, now - sender).apply()
+    }
 
     private companion object {
         const val PREFS = "learned"
         const val KEY_WORDS = "ad_words"
         const val KEY_BLOCKED = "blocked_senders"
         const val KEY_COUNT = "ads_from:"
+        const val KEY_ALLOWED = "allowed_senders"
         // common Persian words that appear in both ads and real messages
         val STOP = setOf("برای", "اینکه", "است", "شد", "شده", "کرد", "کند", "باشید", "میشود",
             "همین", "کلیک", "کنید", "لغو", "دارد", "شما", "مبلغ", "ریال", "تومان", "پیامک")

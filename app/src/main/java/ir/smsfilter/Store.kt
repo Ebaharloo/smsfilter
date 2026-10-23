@@ -67,6 +67,17 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter
     fun relabel(id: Long, label: Label) = writableDatabase
         .execSQL("UPDATE msg SET label=?, manual=1 WHERE id=?", arrayOf(label.name, id))
 
+    /**
+     * Relabel every stored copy of one message. The store keeps a row per arrival, and the same
+     * text can sit there as SPAM more than once - relabelling only the tapped row left the other
+     * copies on the Ads page, so the message looked like it came back.
+     */
+    fun relabelCopies(sender: String, text: String, label: Label) = writableDatabase
+        .execSQL(
+            "UPDATE msg SET label=?, manual=1 WHERE sender=? AND text=?",
+            arrayOf(label.name, sender, text)
+        )
+
     fun delete(id: Long) =
         writableDatabase.delete("msg", "id=?", arrayOf(id.toString()))
 

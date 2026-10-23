@@ -271,5 +271,44 @@
     "gov",
     "transaction",
     "transaction_confirm"
-  ]
+  ],
+  "transactional": {
+    "_comment": "Messages that exist because the user did something (order, delivery, payment, booking). They are protected only when the message carries no marketing markers (link, لغو11, 2+ emoji) - shop ads quote the same words.",
+    "terms": [
+      "کد تحویل",
+      "کد دریافت",
+      "کد مرسوله",
+      "کد رهگیری",
+      "کد پیگیری",
+      "شماره پیگیری",
+      "شماره سفارش",
+      "وضعیت سفارش",
+      "سفارش شما",
+      "سفارشات شما",
+      "ثبت سفارش",
+      "لغو سفارش",
+      "آماده تحویل",
+      "آماده ارسال",
+      "تحویل داده",
+      "تحویل شد",
+      "ارسال شد",
+      "ارسال گردید",
+      "فاکتور شما",
+      "صورتحساب شما",
+      "پرداخت موفق",
+      "پرداخت شما",
+      "تراکنش موفق",
+      "رزرو شما",
+      "نوبت شما",
+      "تیکت شما",
+      "پاسخ تیکت",
+      "بلیط شما",
+      "کد بلیط",
+      "مرجوعی",
+      "گارانتی",
+      "کد امنیتی شما",
+      "لینک پرداخت",
+      "درخواست شما ثبت"
+    ]
+  }
 }

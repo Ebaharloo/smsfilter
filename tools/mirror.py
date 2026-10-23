@@ -164,6 +164,17 @@ def classify(text: str, sender: str = "", contacts: set[str] | None = None) -> d
     if hit and (hard_hit or p_early < soft_conf):
         return {"label": "IMPORTANT", "score": score, "p": p_early, "why": [hit] + why, "norm": norm}
 
+    # "this message exists because the user did something": order/delivery/payment/booking notices.
+    # Same shops send both, so the words alone are not enough - an ad carries a link, the CRA "لغو"
+    # opt-out line or several emoji; a real notice does not.
+    ad_shaped = has_url or n_emoji >= 2 or any(w.startswith("لغو") for w in why)
+    if not ad_shaped:
+        for term in RULES.get("transactional", {}).get("terms", []):
+            tn = normalize(term).replace(" ", "")
+            if tn and tn in squash:
+                return {"label": "IMPORTANT", "score": score, "p": p_early,
+                        "why": [f"txn:{term}"] + why, "norm": norm}
+
     mp = RULES["model"]
     if MODEL is not None:
         p = MODEL.prob(text)
