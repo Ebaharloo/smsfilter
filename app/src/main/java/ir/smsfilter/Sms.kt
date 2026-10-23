@@ -5,6 +5,7 @@ import android.content.Context
 import android.provider.Telephony
 import android.telephony.SmsManager
 import android.telephony.SubscriptionManager
+import android.util.Log
 
 /**
  * Threads and messages from the system SMS provider.
@@ -404,10 +405,13 @@ object Sms {
 
     fun deleteThread(ctx: Context, threadId: Long) {
         try {
-            ctx.contentResolver.delete(
+            val n = ctx.contentResolver.delete(
                 Telephony.Sms.CONTENT_URI, "${Telephony.Sms.THREAD_ID}=?", arrayOf(threadId.toString())
             )
+            if (n <= 0) Log.w("SMSFilter", "delete of thread $threadId removed no rows")
         } catch (t: Throwable) {
+            // never silent: a failed delete means the conversation is still in the inbox
+            Log.e("SMSFilter", "delete of thread $threadId failed", t)
         }
     }
 

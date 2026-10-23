@@ -371,6 +371,7 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
     var rows by remember { mutableStateOf(listOf<Msg>()) }
     var previews by remember { mutableStateOf(mapOf<Long, String>()) }
     var counts by remember { mutableStateOf(mapOf<Label, Int>()) }
+    var showUnsure by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
@@ -380,9 +381,9 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
 
     fun refresh() = scope.launch {
         withContext(Dispatchers.IO) {
-            // the page used to cap at 300 while the header showed the true count, so older ads were
-            // neither visible nor restorable
-            val loaded = store.list(Label.SPAM, limit = 2000)
+            // "unsure 85" used to be counted in the header and listed nowhere: those rows are the
+            // ones worth a human look, so they get their own view
+            val loaded = store.list(if (showUnsure) Label.UNSURE else Label.SPAM, limit = 20000)
             rows = loaded
             // bidi isolation is regex work: do it here, off the scroll path
             previews = loaded.associate { it.id to InboxPolicy.forDisplay(it.text.replace('\n', ' ')) }
@@ -455,10 +456,37 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                                     snack.showSnackbar("exported $n labels → $path")
                                 }
                             })
+                        DropdownMenuItem(
+                            text = { Text("Import my earlier ad marks") },
+                            onClick = {
+                                menuOpen = false
+                                scope.launch {
+                                    val n = withContext(Dispatchers.IO) {
+                                        InboxScan.importOldMarksAsLabels(ctx, store)
+                                    }
+                                    refresh()
+                                    snack.showSnackbar("$n messages from conversations you marked became labels")
+                                }
+                            })
                     }
                 }
             }
             SearchPill(query, { query = it }, "Search ads")
+            Row(
+                Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = !showUnsure,
+                    onClick = { if (showUnsure) { showUnsure = false; refresh() } },
+                    label = { Text("Ads ${counts[Label.SPAM] ?: 0}") }
+                )
+                FilterChip(
+                    selected = showUnsure,
+                    onClick = { if (!showUnsure) { showUnsure = true; refresh() } },
+                    label = { Text("Unsure ${counts[Label.UNSURE] ?: 0}") }
+                )
+            }
             Text(
                 "filtered ${counts[Label.SPAM] ?: 0} · kept ${counts[Label.IMPORTANT] ?: 0} · unsure ${counts[Label.UNSURE] ?: 0}" +
                     if ((counts[Label.SPAM] ?: 0) > rows.size) " · showing newest ${rows.size}" else "",
@@ -469,8 +497,12 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
             if (shown.isEmpty()) {
                 Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center,
                     horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
-                    Text(if (rows.isEmpty()) "Nothing filtered yet" else "No ad matches",
-                        style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        if (rows.isEmpty()) {
+                            if (showUnsure) "Nothing is unsure right now" else "Nothing filtered yet"
+                        } else "No match",
+                        style = MaterialTheme.typography.titleMedium
+                    )
                     Text("Ads the filter catches land here instead of your inbox.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -490,12 +522,14 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                                 }
                             },
                             onLeft = {
-                                // blocking is a user verdict too: keep it for training before acting
-                                withContext(Dispatchers.IO) { store.recordLabel(m.sender, m.text, Label.SPAM) }
-                                Blocked.add(ctx, m.sender)
-                                // blocking is forward-looking: this stored ad stays until the user
-                                // restores or deletes it, and the snackbar has to say so
-                                scope.launch { snack.showSnackbar("${Contacts.displayName(m.sender)} blocked — this ad stays here") }
+                                scope.launch {
+                                    // blocking is a user verdict too: keep it for training before acting
+                                    withContext(Dispatchers.IO) { store.recordLabel(m.sender, m.text, Label.SPAM) }
+                                    Blocked.add(ctx, m.sender)
+                                    // blocking is forward-looking: this stored ad stays until the user
+                                    // restores or deletes it, and the snackbar has to say so
+                                    snack.showSnackbar("${Contacts.displayName(m.sender)} blocked — this ad stays here")
+                                }
                             },
                             onHeavy = {
                                 scope.launch {

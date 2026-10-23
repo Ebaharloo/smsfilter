@@ -254,12 +254,11 @@ fun ConversationsPage(
 
     // heavy swipe: the user says this is an ad, so teach the model and get it out of the inbox
     fun filterThread(row: ThreadRow) = scope.launch {
-        withContext(Dispatchers.IO) {
-            AdActions.markAd(ctx, store, learned, row.address, row.snippet, row.date, row.id)
-            AdActions.moveConversationToAds(ctx, row.id)
+        val kept = withContext(Dispatchers.IO) {
+            AdActions.moveConversationToAds(ctx, store, learned, row.id)
         }
         onReload()
-        snack.showSnackbar("Moved to Ads — the filter learned from it")
+        snack.showSnackbar(if (kept > 0) "$kept messages moved to Ads" else "Nothing to move")
     }
 
     fun toggleRead(row: ThreadRow) = scope.launch {
@@ -899,13 +898,47 @@ fun ThreadPage(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant) },
                         onClick = {
                             menuOpen = false
-                            val sample = messages.lastOrNull { it.incoming }?.body.orEmpty()
                             scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    AdActions.markAd(ctx, null, learned, address, sample, threadId = resolvedId)
-                                    AdActions.moveConversationToAds(ctx, resolvedId)
+                                val kept = withContext(Dispatchers.IO) {
+                                    // store! null here meant the menu taught words and quarantined the
+                                    // thread but kept no training copy, so the user's triage vanished
+                                    AdActions.moveConversationToAds(ctx, Store.get(ctx), learned, resolvedId)
                                 }
+                                Toast.makeText(
+                                    ctx,
+                                    if (kept > 0) "$kept messages moved to Ads" else "Nothing to move",
+                                    Toast.LENGTH_SHORT
+                                ).show()
                                 onBack()
+                            }
+                        })
+                    // triage without moving anything: label the whole conversation for training
+                    DropdownMenuItem(text = { Text("Label all as ads (keep here)") },
+                        leadingIcon = { Icon(Icons.Filled.Info, null, modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        onClick = {
+                            menuOpen = false
+                            scope.launch {
+                                val n = withContext(Dispatchers.IO) {
+                                    Store.get(ctx).recordLabels(address, messages.map { it.body }, Label.SPAM)
+                                    learned?.markAd(address, messages.lastOrNull { it.incoming }?.body.orEmpty())
+                                    messages.size
+                                }
+                                Toast.makeText(ctx, "$n messages labelled as ads", Toast.LENGTH_SHORT).show()
+                            }
+                        })
+                    DropdownMenuItem(text = { Text("Label all as not ads (keep here)") },
+                        leadingIcon = { Icon(Icons.Filled.Info, null, modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                        onClick = {
+                            menuOpen = false
+                            scope.launch {
+                                val n = withContext(Dispatchers.IO) {
+                                    Store.get(ctx).recordLabels(address, messages.map { it.body }, Label.IMPORTANT)
+                                    learned?.markImportant(address)
+                                    messages.size
+                                }
+                                Toast.makeText(ctx, "$n messages labelled as not ads", Toast.LENGTH_SHORT).show()
                             }
                         })
                     DropdownMenuItem(text = { Text(if (blocked) "Unblock sender" else "Block sender") },

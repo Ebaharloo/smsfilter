@@ -32,11 +32,32 @@ object AdActions {
         if (tid > 0) ThreadFlags.unmarkSpam(ctx, tid)
     }
 
-    /** "send this conversation to the Ads page": the copy is kept, the messages leave the inbox */
-    fun moveConversationToAds(ctx: Context, threadId: Long) {
-        if (threadId <= 0) return
+    /**
+     * "send this conversation to the Ads page": every message is copied to our database *before*
+     * the conversation leaves the inbox.
+     *
+     * Keeping only the newest message (what this used to do) was data loss: the provider rows were
+     * deleted a line later, so every other message in the conversation was gone before it could be
+     * labelled or classified. The copy is the only surviving record, therefore it is the whole
+     * conversation, and every message becomes a training label.
+     */
+    fun moveConversationToAds(ctx: Context, store: Store?, learned: Learned?, threadId: Long): Int {
+        if (threadId <= 0) return 0
+        val msgs = Sms.messages(ctx, threadId, window = Int.MAX_VALUE)
+        if (msgs.isEmpty()) return 0
+        val sender = msgs.lastOrNull { it.incoming }?.address?.takeIf { it.isNotBlank() }
+            ?: msgs.first().address
+        var kept = 0
+        msgs.forEach { m ->
+            if (m.body.isBlank()) return@forEach
+            store?.add(sender, m.body, Verdict(Label.SPAM, 99, listOf("user:ad"), m.body), m.date)
+            store?.recordLabel(sender, m.body, Label.SPAM, m.date)
+            kept++
+        }
+        learned?.markAd(sender, msgs.lastOrNull { it.incoming }?.body.orEmpty())
         ThreadFlags.unmarkSpam(ctx, threadId)
         Sms.deleteThread(ctx, threadId)
+        return kept
     }
 
     /**

@@ -16,7 +16,7 @@ data class Msg(
     val why: String
 )
 
-class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 4) {
+class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter.db", null, 5) {
 
     companion object {
         @Volatile private var inst: Store? = null
@@ -48,6 +48,16 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter
             )
         }
         createLabels(db)
+        if (old < 5) {
+            // v4 keyed on (text,label), so correcting a verdict added a second row instead of
+            // replacing it. One verdict per message.
+            db.execSQL("CREATE TABLE IF NOT EXISTS labels_v5(text TEXT NOT NULL PRIMARY KEY, "
+                + "sender TEXT, label TEXT NOT NULL, ts INTEGER NOT NULL)")
+            db.execSQL("INSERT OR REPLACE INTO labels_v5(text, sender, label, ts) "
+                + "SELECT text, sender, label, ts FROM labels ORDER BY ts")
+            db.execSQL("DROP TABLE IF EXISTS labels")
+            db.execSQL("ALTER TABLE labels_v5 RENAME TO labels")
+        }
     }
 
     /**
@@ -58,8 +68,8 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter
      * made by hand. Every tap is recorded here once and never rewritten: triage is done once.
      */
     private fun createLabels(db: SQLiteDatabase) = db.execSQL(
-        "CREATE TABLE IF NOT EXISTS labels(text TEXT NOT NULL, sender TEXT, label TEXT NOT NULL, " +
-            "ts INTEGER NOT NULL, PRIMARY KEY(text, label))"
+        "CREATE TABLE IF NOT EXISTS labels(text TEXT NOT NULL PRIMARY KEY, sender TEXT, " +
+            "label TEXT NOT NULL, ts INTEGER NOT NULL)"
     )
 
     fun add(sender: String, text: String, v: Verdict, ts: Long = System.currentTimeMillis()): Long =
@@ -88,6 +98,12 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter
             if (it.moveToFirst()) it.getString(0) else null
         }
 
+    /** does a copy of this exact message exist? the gate before any provider delete */
+    fun hasCopy(sender: String, text: String): Boolean =
+        readableDatabase.rawQuery(
+            "SELECT 1 FROM msg WHERE sender=? AND text=? LIMIT 1", arrayOf(sender, text)
+        ).use { it.moveToFirst() }
+
     /** every user decision, for training and for "did the new model improve?" */
     fun labels(): List<Triple<String, String, String>> {
         val out = mutableListOf<Triple<String, String, String>>()
@@ -98,6 +114,25 @@ class Store private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "smsfilter
     }
 
     fun labelCounts(): Map<String, Int> = labels().groupingBy { it.third }.eachCount()
+
+    /** record one verdict for every message of a conversation: triage per thread, not per message */
+    fun recordLabels(sender: String, texts: List<String>, label: Label, ts: Long = System.currentTimeMillis()) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            texts.filter { it.isNotBlank() }.forEach { text ->
+                db.insertWithOnConflict("labels", null, ContentValues().apply {
+                    put("text", text)
+                    put("sender", sender)
+                    put("label", label.name)
+                    put("ts", ts)
+                }, SQLiteDatabase.CONFLICT_REPLACE)
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
 
     /** JSONL the trainer reads; one object per line, no escaping surprises */
     fun labelsJsonl(): String = buildString {
