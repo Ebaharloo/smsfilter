@@ -51,6 +51,23 @@ class IncomingSms : BroadcastReceiver() {
             else -> return
         }
 
+        // Everything below talks to the contacts and SMS providers. On the broadcast main thread a
+        // slow provider delays the notification and risks an ANR at 50 ads/hour, so it runs on a
+        // worker with goAsync, the same pattern ACTION_SCAN already used.
+        val app = ctx.applicationContext
+        val pending = goAsync()
+        Thread {
+            try {
+                deliver(app, intent)
+            } catch (t: Throwable) {
+                android.util.Log.e("SMSFilter", "deliver failed", t)
+            } finally {
+                pending.finish()
+            }
+        }.start()
+    }
+
+    private fun deliver(ctx: Context, intent: Intent) {
         val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent) ?: return
         if (messages.isEmpty()) return
 

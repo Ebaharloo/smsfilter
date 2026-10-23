@@ -203,6 +203,7 @@ fun ConversationsPage(
     var query by remember { mutableStateOf("") }
     var tab by remember { mutableStateOf(Tab.ALL) }
     var selection by remember { mutableStateOf(setOf<Long>()) }
+    var confirmDelete by remember { mutableStateOf<Set<Long>?>(null) }
     var newMessage by remember { mutableStateOf(false) }
     val snack = remember { SnackbarHostState() }
 
@@ -288,7 +289,7 @@ fun ConversationsPage(
                     TextButton(onClick = { archiveThreads(selection) }) {
                         Text(if (archivedMode) "Unarchive" else "Archive")
                     }
-                    TextButton(onClick = { deleteThreads(selection) }) { Text("Delete") }
+                    TextButton(onClick = { confirmDelete = selection }) { Text("Delete") }
                 }
             } else {
                 SearchPill(query, { query = it })
@@ -401,6 +402,19 @@ fun ConversationsPage(
         RecipientPicker(
             onPick = { number -> newMessage = false; onOpenThread(-1L, number) },
             onDismiss = { newMessage = false }
+        )
+    }
+
+    // archive has an UNDO; deleting cannot be undone, so it asks first
+    confirmDelete?.let { ids ->
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            title = { Text(if (ids.size == 1) "Delete conversation?" else "Delete ${ids.size} conversations?") },
+            text = { Text("The messages are removed from your SMS store. This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = { confirmDelete = null; deleteThreads(ids) }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel") } }
         )
     }
 }
@@ -669,6 +683,7 @@ fun ThreadPage(
     address: String,
     learned: Learned? = null,
     initialBody: String? = null,
+    refreshKey: Int = 0,
     onBack: () -> Unit
 ) {
     val ctx = LocalContext.current
@@ -702,6 +717,7 @@ fun ThreadPage(
     // which SIM replies go out on; defaults to the SIM the last incoming message arrived on
     var sendSim by remember { mutableStateOf<Int?>(null) }
     var chooseSim by remember { mutableStateOf(false) }
+    var confirmDeleteThread by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
     fun reload() = scope.launch {
@@ -726,13 +742,24 @@ fun ThreadPage(
         }
     }
     LaunchedEffect(threadId) { reload() }
+    // live: a message arriving while this conversation is open, or any other provider change, only
+    // re-reads the bubbles. reload() also marks the thread read, and that write comes back through
+    // the content observer - reusing it here would loop.
+    var liveReady by remember { mutableStateOf(false) }
+    LaunchedEffect(refreshKey) {
+        if (!liveReady) { liveReady = true; return@LaunchedEffect }
+        val id = resolvedId.takeIf { it > 0 } ?: return@LaunchedEffect
+        messages = withContext(Dispatchers.IO) { Sms.messages(ctx, id) }
+    }
     LaunchedEffect(messages.size) {
         // jump straight to the newest bubble: animating from index 0 looked like the app scrolling by itself
         if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
     }
     LaunchedEffect(draft) {
         delay(400)
-        prefs.edit().putString(draftKey, draft).apply()
+        // keep the drafts store clean: clearing the field should remove the entry, not store ""
+        if (draft.isBlank()) prefs.edit().remove(draftKey).apply()
+        else prefs.edit().putString(draftKey, draft).apply()
     }
 
     fun doSend(text: String, sub: Int?) {
@@ -863,12 +890,7 @@ fun ThreadPage(
                             tint = MaterialTheme.colorScheme.error) },
                         onClick = {
                         menuOpen = false
-                        scope.launch {
-                            withContext(Dispatchers.IO) {
-                                if (resolvedId > 0) Sms.deleteThread(ctx, resolvedId)
-                            }
-                            onBack()
-                        }
+                        confirmDeleteThread = true
                     })
                 }
             }
@@ -1077,6 +1099,26 @@ fun ThreadPage(
                 }
             }
         }
+    }
+
+    if (confirmDeleteThread) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteThread = false },
+            title = { Text("Delete this conversation?") },
+            text = { Text("Every message in it is removed from your SMS store. This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDeleteThread = false
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            if (resolvedId > 0) Sms.deleteThread(ctx, resolvedId)
+                        }
+                        onBack()
+                    }
+                }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { confirmDeleteThread = false }) { Text("Cancel") } }
+        )
     }
 
     details?.let { m ->

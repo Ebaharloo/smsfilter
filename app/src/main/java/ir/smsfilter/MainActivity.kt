@@ -56,9 +56,10 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -178,6 +179,8 @@ fun App(
     var inbox by remember { mutableStateOf<InboxData?>(null) }
     var reload by remember { mutableIntStateOf(0) }
     LaunchedEffect(reload) {
+        // 120 ms coalesces the burst of onChange callbacks one provider write fires
+        kotlinx.coroutines.delay(120)
         val fresh = withContext(Dispatchers.IO) {
             val threads = Sms.threads(ctx)
             val bySuffix = Contacts.namesFor(ctx)
@@ -192,6 +195,20 @@ fun App(
             )
         }
         inbox = fresh
+    }
+    // The provider changes behind our back: a message that arrived while the list is open, another
+    // app writing, or our own action. Without this the inbox never showed a new SMS until the page
+    // was reopened.
+    DisposableEffect(Unit) {
+        val observer = object : android.database.ContentObserver(
+            android.os.Handler(android.os.Looper.getMainLooper())
+        ) {
+            override fun onChange(selfChange: Boolean) { reload++ }
+        }
+        ctx.contentResolver.registerContentObserver(
+            android.provider.Telephony.Sms.CONTENT_URI, true, observer
+        )
+        onDispose { ctx.contentResolver.unregisterContentObserver(observer) }
     }
     var composeBody by remember { mutableStateOf<String?>(null) }
     // opened from the address book / a sms: link / a notification: go straight to that conversation
@@ -278,7 +295,7 @@ fun App(
                                 learned = learned,
                                 store = store
                             )
-                            else ThreadPage(open.first, open.second, learned, composeBody) {
+                            else ThreadPage(open.first, open.second, learned, composeBody, reload) {
                                 thread = null
                                 composeBody = null
                                 reload++      // read state / spam marks may have changed
@@ -336,7 +353,9 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
 
     fun refresh() = scope.launch {
         withContext(Dispatchers.IO) {
-            rows = store.list(Label.SPAM)
+            // the page used to cap at 300 while the header showed the true count, so older ads were
+            // neither visible nor restorable
+            rows = store.list(Label.SPAM, limit = 2000)
             counts = store.counts()
         }
     }
@@ -395,7 +414,8 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
             }
             SearchPill(query, { query = it }, "Search ads")
             Text(
-                "filtered ${counts[Label.SPAM] ?: 0} · kept ${counts[Label.IMPORTANT] ?: 0} · unsure ${counts[Label.UNSURE] ?: 0}",
+                "filtered ${counts[Label.SPAM] ?: 0} · kept ${counts[Label.IMPORTANT] ?: 0} · unsure ${counts[Label.UNSURE] ?: 0}" +
+                    if ((counts[Label.SPAM] ?: 0) > rows.size) " · showing newest ${rows.size}" else "",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
@@ -425,7 +445,9 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
                             },
                             onLeft = {
                                 Blocked.add(ctx, m.sender)
-                                scope.launch { snack.showSnackbar("${Contacts.displayName(m.sender)} blocked") }
+                                // blocking is forward-looking: this stored ad stays until the user
+                                // restores or deletes it, and the snackbar has to say so
+                                scope.launch { snack.showSnackbar("${Contacts.displayName(m.sender)} blocked — this ad stays here") }
                             },
                             onHeavy = {
                                 scope.launch {
@@ -730,16 +752,35 @@ fun SettingsPage() {
     var filterOn by remember {
         mutableStateOf(ctx.getSharedPreferences(PREFS, 0).getBoolean("filter_on", true))
     }
-    val listenerOk = remember {
-        nm.isNotificationListenerAccessGranted(android.content.ComponentName(ctx, FilterService::class.java))
-    }
-    val smsOk = androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_SMS) ==
-        PackageManager.PERMISSION_GRANTED
-    val contactsOk = androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) ==
-        PackageManager.PERMISSION_GRANTED
+    var listenerOk by remember { mutableStateOf(false) }
+    var smsOk by remember { mutableStateOf(false) }
+    var contactsOk by remember { mutableStateOf(false) }
+    var isDefaultSms by remember { mutableStateOf(false) }
     val roleManager = remember { ctx.getSystemService(RoleManager::class.java) }
-    val isDefaultSms = remember { roleManager?.isRoleAvailable(RoleManager.ROLE_SMS) == true &&
-        roleManager.isRoleHeld(RoleManager.ROLE_SMS) }
+
+    // Permission and role state used to be read once inside remember{}, so the page kept claiming
+    // "missing" after the user granted it in the dialog it had just opened.
+    fun refresh() {
+        listenerOk = try {
+            nm.isNotificationListenerAccessGranted(android.content.ComponentName(ctx, FilterService::class.java))
+        } catch (t: Throwable) {
+            false
+        }
+        smsOk = androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_SMS) ==
+            PackageManager.PERMISSION_GRANTED
+        contactsOk = androidx.core.content.ContextCompat.checkSelfPermission(ctx, Manifest.permission.READ_CONTACTS) ==
+            PackageManager.PERMISSION_GRANTED
+        isDefaultSms = roleManager?.isRoleAvailable(RoleManager.ROLE_SMS) == true &&
+            roleManager.isRoleHeld(RoleManager.ROLE_SMS)
+    }
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(Unit) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) refresh()
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
 
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
