@@ -14,6 +14,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -1060,10 +1061,10 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Not spam only"); Switch(checked = notSpamOnly, onCheckedChange = { notSpamOnly = it })
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(selected = otpMode == 0, onClick = { otpMode = 0 }, label = { Text("Any OTP") })
-                    FilterChip(selected = otpMode == 1, onClick = { otpMode = 1 }, label = { Text("OTP required") })
-                    FilterChip(selected = otpMode == 2, onClick = { otpMode = 2 }, label = { Text("No OTP") })
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = otpMode == 0, onClick = { otpMode = 0 }, label = { Text("Any OTP") }, modifier = Modifier.width(110.dp))
+                    FilterChip(selected = otpMode == 1, onClick = { otpMode = 1 }, label = { Text("OTP required") }, modifier = Modifier.width(110.dp))
+                    FilterChip(selected = otpMode == 2, onClick = { otpMode = 2 }, label = { Text("No OTP") }, modifier = Modifier.width(110.dp))
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Match all conditions"); Switch(checked = matchAll, onCheckedChange = { matchAll = it })
