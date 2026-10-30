@@ -60,6 +60,11 @@ class Learned(ctx: Context) : LearnedSignals {
 
     override fun blocked(): Set<String> = p.getStringSet(KEY_BLOCKED, emptySet()) ?: emptySet()
 
+    fun blockSender(sender: String) {
+        if (sender.isBlank()) return
+        p.edit().putStringSet(KEY_BLOCKED, blocked().toMutableSet().apply { add(sender) }).apply()
+    }
+
     override fun adWordHits(normNoSpaces: String): Int = adWords.count { it in normNoSpaces }
 
     /**

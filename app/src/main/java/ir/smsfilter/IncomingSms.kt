@@ -9,6 +9,8 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Telephony
 import androidx.core.app.NotificationCompat
+import ir.smsfilter.addon.AddonBus
+import ir.smsfilter.addon.SmsEvent
 
 /**
  * Receives SMS because we are the default SMS app. As default, the system no longer writes incoming
@@ -114,6 +116,7 @@ class IncomingSms : BroadcastReceiver() {
 
         val threadId = Sms.threadIdFor(ctx, address) ?: -1L
         val muted = ThreadFlags.isMuted(ctx, threadId)
+        val fromContact = try { Contacts.suffixes(ctx).any { address.endsWith(it) } } catch (t: Throwable) { false }
         // spam/mute policy is pure Kotlin so it is covered by unit tests
         val decision = ir.smsfilter.core.InboxPolicy.notifyFor(muted, isSpam)
 
@@ -123,6 +126,8 @@ class IncomingSms : BroadcastReceiver() {
             nm.createNotificationChannel(NotificationChannel(ADS_CHANNEL, "Filtered ads", NotificationManager.IMPORTANCE_LOW))
             channelsReady = true
         }
+
+        AddonBus.dispatch(ctx, SmsEvent(address, body, date, subId, threadId, isSpam, fromContact, otpOf(body), NOTIF_ID + address.hashCode()))
 
         if (decision == ir.smsfilter.core.Notify.DIGEST) {
             // one low-priority digest, updated in place - 50 ads/hour must not mean 50 notifications

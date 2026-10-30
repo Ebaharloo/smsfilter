@@ -20,7 +20,7 @@ android {
     // single source of truth: the same rules.json the Python mirror reads
     sourceSets["main"].assets.srcDirs("src/main/assets", "../rules")
 
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
