@@ -175,7 +175,7 @@ class IncomingSms : BroadcastReceiver() {
         // OTP codes are the one thing worth a one-tap action
         otpOf(body)?.let { code ->
             val copyIntent = PendingIntent.getBroadcast(
-                ctx, 12, Intent(ctx, IncomingSms::class.java).apply {
+                ctx, 12, Intent(ctx, OtpCopyReceiver::class.java).apply {
                     action = ACTION_COPY_OTP
                     putExtra("code", code)
                 }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
