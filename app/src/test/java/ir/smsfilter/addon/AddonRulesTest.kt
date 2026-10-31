@@ -180,4 +180,220 @@ class AddonRulesTest {
         assertTrue(AddonRules.matches(AddonRule(keywordContains = "تخفیف"), event(body = "ت خ ف ی ف")))
     }
 
+    // --- S2: keyword list, ALL/ANY, regex ---
+
+    @Test
+    fun orModeNeedsOnlyOneTerm() {
+        val rule = AddonRule(keywords = listOf("otp", "رمز"), keywordMode = "OR")
+        assertTrue(AddonRules.matches(rule, event(body = "your otp code")))
+        assertTrue(AddonRules.matches(rule, event(body = "رمز شما 42")))
+        assertFalse(AddonRules.matches(rule, event(body = "hello")))
+    }
+
+    @Test
+    fun andModeNeedsEveryTerm() {
+        val rule = AddonRule(keywords = listOf("otp", "bank"), keywordMode = "AND")
+        assertTrue(AddonRules.matches(rule, event(body = "bank otp")))
+        assertFalse(AddonRules.matches(rule, event(body = "bank only")))
+        assertFalse(AddonRules.matches(rule, event(body = "otp only")))
+    }
+
+    @Test
+    fun unknownModeFallsBackToAnd() {
+        val rule = AddonRule(keywords = listOf("otp", "bank"), keywordMode = "XOR")
+        assertTrue(AddonRules.matches(rule, event(body = "bank otp")))
+        assertFalse(AddonRules.matches(rule, event(body = "bank only")))
+    }
+
+    @Test
+    fun regexMatchesNormalizedBody() {
+        val rule = AddonRule(keywords = listOf("^09\\d{9}"), keywordRegex = true)
+        assertTrue(AddonRules.matches(rule, event(body = "۰۹۱۲۳۴۵۶۷۸۹")))
+        assertFalse(AddonRules.matches(rule, event(body = "شماره ۰۹۱۲۳۴۵۶۷۸۹ چیست")))
+        // body is normalized (lowercased) before matching, so case must not matter
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("^hello"), keywordRegex = true), event(body = "HELLO there")))
+    }
+
+    @Test
+    fun invalidRegexDoesNotThrowAndDoesNotMatch() {
+        assertFalse(AddonRules.matches(AddonRule(keywords = listOf("("), keywordRegex = true), event(body = "a(b")))
+        // OR: a broken term must not poison a working one ...
+        assertTrue(
+            AddonRules.matches(
+                AddonRule(keywords = listOf("(", "otp"), keywordMode = "OR", keywordRegex = true),
+                event(body = "your otp")
+            )
+        )
+        // ... and AND: a broken term makes the rule fail, not match
+        assertFalse(
+            AddonRules.matches(
+                AddonRule(keywords = listOf("(", "otp"), keywordMode = "AND", keywordRegex = true),
+                event(body = "your otp")
+            )
+        )
+    }
+
+    @Test
+    fun legacyKeywordContainsStillMatches() {
+        // Migration: load() needs a Context, so this pins the pure decision instead of the JSON path.
+        // A rule built the pre-S2 way (keywordContains only, keywords empty) must behave exactly as before.
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = "کد"), event(body = "کد ۴۲")))
+        assertFalse(AddonRules.matches(AddonRule(keywordContains = "کد"), event(body = "خداحافظ")))
+        // load() copies legacy keywordContains into keywords; the list must win identically.
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = "کد", keywords = listOf("کد")), event(body = "کد 42")))
+    }
+
+    @Test
+    fun emptyKeywordListIsNoCondition() {
+        assertTrue(AddonRules.matches(AddonRule(keywords = emptyList()), event(body = "")))
+        assertTrue(AddonRules.matches(AddonRule(keywords = emptyList(), onlyNotSpam = true), event(isSpam = false)))
+    }
+
+    @Test
+    fun singleTermMatchesLikeLegacy() {
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("OTP")), event(body = "your otp code")))
+        assertFalse(AddonRules.matches(AddonRule(keywords = listOf("OTP")), event(body = "hello")))
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("تخفیف")), event(body = "ت خ ف ی ف")))
+    }
+
+    @Test
+    fun termNormalizingToEmptyInListDoesNotWiden() {
+        val zwnj = "\u200C"
+        assertFalse(
+            "AND: unusable term must fail the rule",
+            AddonRules.matches(AddonRule(keywords = listOf("otp", zwnj), keywordMode = "AND"), event(body = "your otp code"))
+        )
+        assertTrue(
+            "OR: usable term still matches",
+            AddonRules.matches(AddonRule(keywords = listOf("otp", zwnj), keywordMode = "OR"), event(body = "your otp code"))
+        )
+        assertFalse(
+            "OR: unusable term must not make everything match",
+            AddonRules.matches(AddonRule(keywords = listOf("otp", zwnj), keywordMode = "OR"), event(body = "hello"))
+        )
+        assertFalse(
+            "OR: unusable term alone never matches",
+            AddonRules.matches(AddonRule(keywords = listOf(zwnj), keywordMode = "OR"), event(body = "anything"))
+        )
+        assertFalse(
+            "regex mode: empty pattern is inert",
+            AddonRules.matches(AddonRule(keywords = listOf(""), keywordMode = "OR", keywordRegex = true), event(body = "anything"))
+        )
+    }
+    // ---------- S2: bounded regex work ----------
+
+    @Test
+    fun regexNeverSeesTextPastChar200() {
+        // Intended: the subject is capped at 200 chars, so a term only present later can never match.
+        assertFalse("match past char 200 must NOT match (truncation is intended)", AddonRules.matches(
+            AddonRule(keywords = listOf("needle"), keywordRegex = true), event(body = "x".repeat(200) + "needle")))
+        assertTrue("same term fully inside 200 chars still matches", AddonRules.matches(
+            AddonRule(keywords = listOf("needle"), keywordRegex = true), event(body = "x".repeat(194) + "needle")))
+    }
+
+    @Test
+    fun overLongRegexPatternIsRejected() {
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("a".repeat(120)), keywordRegex = true), event(body = "a".repeat(120))))
+        assertFalse("pattern over 120 chars must be rejected", AddonRules.matches(
+            AddonRule(keywords = listOf("a".repeat(121)), keywordRegex = true), event(body = "a".repeat(121))))
+    }
+
+    @Test
+    fun nestedQuantifierRegexIsRejected() {
+        assertFalse(AddonRules.matches(AddonRule(keywords = listOf("(a+)+$"), keywordRegex = true), event(body = "aaaa")))
+        assertFalse(AddonRules.matches(AddonRule(keywords = listOf("(a*)*b"), keywordRegex = true), event(body = "aaab")))
+        assertFalse(AddonRules.matches(AddonRule(keywords = listOf("(ab?){1,9}"), keywordRegex = true), event(body = "abab")))
+        // flat quantifiers are still allowed
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("(ab)+"), keywordRegex = true), event(body = "abab")))
+    }
+
+    @Test
+    fun pathologicalRegexCostsUnder100ms() {
+        val p = "(a+)+$"
+        fun cost(body: String): Long {
+            repeat(5) { AddonRules.matches(AddonRule(keywords = listOf(p), keywordRegex = true), event(body = body)) }
+            val t0 = System.nanoTime()
+            AddonRules.matches(AddonRule(keywords = listOf(p), keywordRegex = true), event(body = body))
+            return (System.nanoTime() - t0) / 1_000_000
+        }
+        val m1000 = cost("a".repeat(1000))
+        val f1000 = cost("a".repeat(1000) + "b")
+        val f5000 = cost("a".repeat(5000) + "b")
+        println("S2 fixed regex cost '$p' (ms): match1000=$m1000 fail1000=$f1000 fail5000=$f5000")
+        assertTrue("pathological regex took ${f1000}ms/1000-char, ${f5000}ms/5001-char, budget 100ms", f1000 < 100 && f5000 < 100 && m1000 < 100)
+    }
+
+    // ---------- S2c: the editor can tell a live regex from a dead one ----------
+
+    @Test
+    fun regexUsableMirrorsRuntimeGate() {
+        // Ordinary patterns must stay usable, or the editor would block rules that work today.
+        listOf("^09\\d{9}$", "ab+", "[0-9]{4}", "(?:ab)+", "https?://\\S+", "\\d{2}:\\d{2}")
+            .forEach { assertTrue("'$it' must be usable", AddonRules.regexUsable(it)) }
+        // The two date shapes carry 3 quantifiers: the quantifier cap refuses them, so they can never
+        // match. The editor now surfaces that instead of failing silently on every SMS.
+        assertFalse(AddonRules.regexUsable("\\d{2}/\\d{2}/\\d{4}"))
+        assertFalse(AddonRules.regexUsable("\\d{4}-\\d{2}-\\d{2}"))
+        assertFalse(AddonRules.regexUsable("(a|b)+"))
+        assertFalse("invalid syntax", AddonRules.regexUsable("("))
+        assertFalse("over the 120-char cap", AddonRules.regexUsable("a".repeat(121)))
+        assertFalse("blank is inert, not usable", AddonRules.regexUsable("   "))
+    }
+
+    // ---------- S2b: overlapping alternation and quantifier piles ----------
+
+    private fun regexCost(pattern: String, body: String): Long {
+        val rule = AddonRule(keywords = listOf(pattern), keywordRegex = true)
+        repeat(200) { AddonRules.matches(rule, event(body = body)) } // JIT warmup: a cold run costs ~10x
+        var best = Long.MAX_VALUE
+        repeat(5) {
+            val t0 = System.nanoTime()
+            AddonRules.matches(rule, event(body = body))
+            best = minOf(best, System.nanoTime() - t0)
+        }
+        return best / 1_000_000
+    }
+
+    @Test
+    fun overlappingAlternationRegexIsRejectedAndFast() {
+        // 'b' must sit inside the 200-char cap: a 300-char body truncates to 200 a's and the pattern matches.
+        val body = "a".repeat(199) + "b"
+        val cost = regexCost("(a|aa)+$", body)
+        println("S2b rejected '(a|aa)+$' cost (ms): $cost")
+        assertFalse("overlapping alternation must be refused", AddonRules.matches(
+            AddonRule(keywords = listOf("(a|aa)+$"), keywordRegex = true), event(body = body)))
+        assertTrue("rejection must be cheap, took ${cost}ms", cost < 100)
+        assertFalse(AddonRules.matches(AddonRule(keywords = listOf("(a|b)+"), keywordRegex = true), event(body = "abab")))
+    }
+
+    @Test
+    fun nonCapturingGroupStaysUsable() {
+        // "(?:" is group syntax, not a quantifier: this is a normal user pattern and must keep working.
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("(?:ab)+"), keywordRegex = true), event(body = "xxababxx")))
+        assertFalse(AddonRules.matches(AddonRule(keywords = listOf("(?:ab)+"), keywordRegex = true), event(body = "xx")))
+    }
+
+    @Test
+    fun quantifierPileIsRejected() {
+        assertFalse("a*a*a*b costs seconds on 200 chars", AddonRules.matches(
+            AddonRule(keywords = listOf("a*a*a*b"), keywordRegex = true), event(body = "aaab")))
+        assertFalse(AddonRules.matches(AddonRule(keywords = listOf("a*a*a*a*b"), keywordRegex = true), event(body = "aaaab")))
+        // two quantifiers stay allowed; ordinary patterns must not be collateral damage
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("a*a*b"), keywordRegex = true), event(body = "aaab")))
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("ab+"), keywordRegex = true), event(body = "abbc")))
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("[0-9]{4}"), keywordRegex = true), event(body = "code 1234")))
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("^09\\d{9}"), keywordRegex = true), event(body = "09123456789")))
+    }
+
+    @Test
+    fun worstAllowedRegexStaysUnder100ms() {
+        // Worst still buildable inside 200 chars: two bounded quantifiers, each up to 200 wide.
+        val p = "a{0,200}a{0,200}b"
+        val body = "a".repeat(200)
+        val worst = regexCost(p, body)
+        val plain = regexCost("a*a*b", body)
+        println("S2b worst allowed regex cost (ms): '$p'=$worst  'a*a*b'=$plain")
+        assertTrue("worst allowed construct took ${worst}ms, budget 100ms", worst < 100 && plain < 100)
+    }
+
 }

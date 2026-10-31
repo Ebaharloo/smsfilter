@@ -998,7 +998,12 @@ fun FeaturesPage() {
 private fun conditionSummary(rule: AddonRule): String {
     val parts = mutableListOf<String>()
     if (rule.senderContains.isNotBlank()) parts += "sender contains '${rule.senderContains}'"
-    if (rule.keywordContains.isNotBlank()) parts += "message contains '${rule.keywordContains}'"
+    val terms = if (rule.keywords.isNotEmpty()) rule.keywords else listOf(rule.keywordContains).filter { it.isNotBlank() }
+    if (terms.isNotEmpty()) {
+        val shown = terms.joinToString(", ") { if (rule.keywordRegex) "/$it/" else "'$it'" }
+        val mode = if (rule.keywordMode.equals("OR", ignoreCase = true)) "any" else "all"
+        parts += "message contains $mode of [$shown]"
+    }
     if (rule.onlyFromContacts) parts += "from contacts"
     if (rule.onlySpam) parts += "spam only"
     if (rule.onlyNotSpam) parts += "not spam only"
@@ -1020,7 +1025,11 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
     val ctx = LocalContext.current
     var name by remember { mutableStateOf(rule.name) }
     var sender by remember { mutableStateOf(rule.senderContains) }
-    var keyword by remember { mutableStateOf(rule.keywordContains) }
+    var keywords by remember {
+        mutableStateOf(if (rule.keywords.isNotEmpty()) rule.keywords else listOf(rule.keywordContains).filter { it.isNotBlank() })
+    }
+    var keywordMode by remember { mutableStateOf(rule.keywordMode) }
+    var keywordRegex by remember { mutableStateOf(rule.keywordRegex) }
     var contactsOnly by remember { mutableStateOf(rule.onlyFromContacts) }
     var spamOnly by remember { mutableStateOf(rule.onlySpam) }
     var notSpamOnly by remember { mutableStateOf(rule.onlyNotSpam) }
@@ -1063,8 +1072,13 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(selected = sender.isNotBlank(), onClick = { openDialog("sender", sender) },
                         label = { Text(if (sender.isBlank()) "Sender contains…" else "Sender: $sender") })
-                    FilterChip(selected = keyword.isNotBlank(), onClick = { openDialog("keyword", keyword) },
-                        label = { Text(if (keyword.isBlank()) "Message contains…" else "Message: $keyword") })
+                    FilterChip(selected = keywords.isNotEmpty(), onClick = { openDialog("keyword", keywords.joinToString(if (keywordRegex) "\n" else ", ")) },
+                        label = { Text(if (keywords.isEmpty()) "Message contains…" else "Message: ${keywords.joinToString(if (keywordRegex) " | " else ", ")}") })
+                    FilterChip(selected = keywordMode.equals("OR", ignoreCase = true),
+                        onClick = { keywordMode = if (keywordMode.equals("OR", ignoreCase = true)) "AND" else "OR" },
+                        label = { Text(if (keywordMode.equals("OR", ignoreCase = true)) "Any keyword" else "All keywords") })
+                    FilterChip(selected = keywordRegex, onClick = { keywordRegex = !keywordRegex },
+                        label = { Text("Regex") })
                     FilterChip(selected = contactsOnly, onClick = { contactsOnly = !contactsOnly },
                         label = { Text("From contacts") })
                     FilterChip(selected = spamOnly, onClick = { spamOnly = !spamOnly; if (spamOnly) notSpamOnly = false },
@@ -1115,7 +1129,10 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                 onSave(rule.copy(
                     name = name,
                     senderContains = sender,
-                    keywordContains = keyword,
+                    keywordContains = keywords.firstOrNull().orEmpty(),
+                    keywords = keywords,
+                    keywordMode = keywordMode,
+                    keywordRegex = keywordRegex,
                     minLength = minLength.toIntOrNull() ?: 0,
                     maxLength = maxLength.toIntOrNull() ?: 0,
                     daysOfWeek = days.trim(),
@@ -1139,6 +1156,10 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
     )
 
     if (dialog != null) {
+        // Refused patterns would never match at runtime: show them and block save instead of going silent.
+        val refused = if (dialog == "keyword" && keywordRegex)
+            dialogValue.split("\n").map { it.trim() }.filter { it.isNotEmpty() && !AddonRules.regexUsable(it) }
+        else emptyList()
         AlertDialog(
             onDismissRequest = { dialog = null },
             title = { Text(when (dialog) {
@@ -1153,18 +1174,24 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                     OutlinedTextField(value = dialogValue, onValueChange = { dialogValue = it }, modifier = Modifier.fillMaxWidth(),
                         label = { Text(when (dialog) {
                             "sender" -> "Substring"
-                            "keyword" -> "Substring"
+                            "keyword" -> if (keywordRegex) "one regex per line" else "a, b, c"
                             "length" -> "min,max"
                             "time" -> "days|start|end"
                             else -> "Value"
                         }) })
+                    if (refused.isNotEmpty()) {
+                        Text("too complex or invalid, will never match: ${refused.joinToString(" | ")}",
+                            color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
+                TextButton(enabled = refused.isEmpty(), onClick = {
                     when (dialog) {
                         "sender" -> sender = dialogValue
-                        "keyword" -> keyword = dialogValue
+                        // a regex may legitimately contain ',', e.g. a{1,3}: split on newline in regex mode only.
+                        "keyword" -> keywords = (if (keywordRegex) dialogValue.split("\n") else dialogValue.split(","))
+                            .map { it.trim() }.filter { it.isNotEmpty() }
                         "length" -> {
                             val parts = dialogValue.split(",").map { it.trim() }
                             minLength = parts.getOrElse(0) { "" }

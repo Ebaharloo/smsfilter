@@ -15,6 +15,14 @@ Diagnosis (from `handoff.md` + code review):
 
 Out of scope: screen/DND/BT/geofence/foreground-app conditions, batch/summarize/undo, non-SMS notifications, Room migration.
 
+## Status
+
+| step | state | evidence |
+|---|---|---|
+| S0 gap matrix | running | scout on APK, writes `BUZZKILL-GAP.md` |
+| S1 normalize | **PASS**, committed `585ebf2` | 86 JVM tests, 0 failed; `TEST-S1.md`; defect (empty-normalized term matched every SMS) found by test team and fixed |
+| S2 keyword list | next | not started |
+
 ## Teams
 
 - DEV team: implements one step, writes JVM tests for it, keeps diff minimal, does not touch core filtering.

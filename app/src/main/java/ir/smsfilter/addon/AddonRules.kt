@@ -24,6 +24,9 @@ data class AddonRule(
     val priority: Int = 0,
     val senderContains: String = "",
     val keywordContains: String = "",
+    val keywords: List<String> = emptyList(),
+    val keywordMode: String = "AND",
+    val keywordRegex: Boolean = false,
     val minLength: Int = 0,
     val maxLength: Int = 0,
     val daysOfWeek: String = "",
@@ -43,6 +46,11 @@ data class AddonRule(
 
 object AddonRules {
     private const val KEY = "addon_rules_json"
+    private const val MAX_REGEX_SUBJECT = 200
+    private const val MAX_PATTERN_LEN = 120
+    private const val MAX_QUANTIFIERS = 2
+    private val GROUP_PREFIX = Regex("\\(\\?[:=!<]")
+    private val NESTED_QUANTIFIER = Regex("\\([^)]*[+*?|][^)]*\\)\\s*[+*{]")
 
     fun load(ctx: Context): MutableList<AddonRule> {
         val raw = ctx.getSharedPreferences(FilterService.PREFS, Context.MODE_PRIVATE)
@@ -59,6 +67,14 @@ object AddonRules {
                     priority = o.optInt("priority", i),
                     senderContains = o.optString("senderContains", ""),
                     keywordContains = o.optString("keywordContains", ""),
+                    keywords = run {
+                        val a = o.optJSONArray("keywords")
+                        val list = (0 until (a?.length() ?: 0)).mapNotNull { i -> a?.opt(i) as? String }
+                        // Rules saved before the keyword list existed only have keywordContains.
+                        if (list.isNotEmpty()) list else listOf(o.optString("keywordContains", "")).filter { it.isNotBlank() }
+                    },
+                    keywordMode = o.optString("keywordMode", "AND"),
+                    keywordRegex = o.optBoolean("keywordRegex", false),
                     minLength = o.optInt("minLength", 0),
                     maxLength = o.optInt("maxLength", 0),
                     daysOfWeek = o.optString("daysOfWeek", ""),
@@ -92,7 +108,10 @@ object AddonRules {
             o.put("enabled", r.enabled)
             o.put("priority", r.priority)
             o.put("senderContains", r.senderContains)
-            o.put("keywordContains", r.keywordContains)
+            o.put("keywordContains", r.keywords.firstOrNull() ?: r.keywordContains)
+            o.put("keywords", JSONArray(r.keywords))
+            o.put("keywordMode", r.keywordMode)
+            o.put("keywordRegex", r.keywordRegex)
             o.put("minLength", r.minLength)
             o.put("maxLength", r.maxLength)
             o.put("daysOfWeek", r.daysOfWeek)
@@ -145,13 +164,25 @@ object AddonRules {
             val sender = Normalizer.normalize(rule.senderContains)
             active += sender.isNotEmpty() && Normalizer.normalize(event.sender).contains(sender)
         }
-        if (rule.keywordContains.isNotBlank()) {
+        val terms = when {
+            rule.keywords.isNotEmpty() -> rule.keywords
+            rule.keywordContains.isNotBlank() -> listOf(rule.keywordContains)
+            else -> emptyList()
+        }
+        if (terms.isNotEmpty()) {
             // normalize() folds Arabic/Persian letter variants, digits and case; squash() also
             // bridges ZWNJ and spaced-out evasion ("ت خ ف ی ف"). Empty kw would match everything.
             val body = Normalizer.normalize(event.body)
-            val kw = Normalizer.normalize(rule.keywordContains)
-            active += kw.isNotEmpty() &&
-                (body.contains(kw) || Normalizer.squash(body).contains(Normalizer.squash(kw)))
+            val squashed = Normalizer.squash(body)
+            val hits = terms.map { term ->
+                if (term.isBlank()) false
+                else if (rule.keywordRegex) regexHit(term, body)
+                else {
+                    val kw = Normalizer.normalize(term)
+                    kw.isNotEmpty() && (body.contains(kw) || squashed.contains(Normalizer.squash(kw)))
+                }
+            }
+            active += if (rule.keywordMode.trim().equals("OR", ignoreCase = true)) hits.any { it } else hits.all { it }
         }
         if (rule.minLength > 0) active += event.body.length >= rule.minLength
         if (rule.maxLength > 0) active += event.body.length <= rule.maxLength
@@ -274,6 +305,42 @@ object AddonRules {
                 }
             }
         }
+    }
+
+    // Bound every user pattern: length, overlapping/nested quantifiers (catastrophic backtracking), subject size.
+    // Whether a user regex can ever match. The editor calls this so a refused pattern is visible
+    // instead of silently never matching; regexHit must stay in lockstep, so it gates on this too.
+    fun regexUsable(pattern: String): Boolean = pattern.isNotBlank() && try {
+        when {
+            pattern.length > MAX_PATTERN_LEN -> false
+            riskyPattern(pattern) -> false
+            else -> { Regex(pattern); true }
+        }
+    } catch (t: Throwable) {
+        false
+    }
+
+    // shortcut: regexes never see text past 200 chars, so an end-anchored term misses on long SMS;
+    // upgrade to RE2/J or a worker thread with a timeout when long-body regex rules are really needed.
+    private fun regexHit(pattern: String, normalizedBody: String): Boolean = try {
+        when {
+            !regexUsable(pattern) -> false
+            else -> Regex(pattern).containsMatchIn(normalizedBody.take(MAX_REGEX_SUBJECT))
+        }
+    } catch (t: Throwable) {
+        // Invalid regex, or catastrophic backtracking (StackOverflowError): the term fails, matches() must not throw.
+        false
+    }
+
+    // Rejected shapes: a quantified group whose body already holds a quantifier or alternation ("(a|aa)+",
+    // "(a+)+", "(ab?)+"), and a pile of quantifiers ("a*a*a*b" measured 3.4s on 200 chars). Group prefixes
+    // like "(?:" are syntax, stripped first so "(?:ab)+" stays usable.
+    // shortcut: 3+ quantifiers are refused even when bounded ("\d{2}/\d{2}/\d{4}"); upgrade to per-quantifier
+    // width analysis when date-style patterns matter.
+    private fun riskyPattern(pattern: String): Boolean {
+        val p = pattern.replace(GROUP_PREFIX, "(")
+        return NESTED_QUANTIFIER.containsMatchIn(p) ||
+            p.count { it == '*' || it == '+' || it == '?' || it == '{' } > MAX_QUANTIFIERS
     }
 
     private fun template(text: String, event: SmsEvent): String {
