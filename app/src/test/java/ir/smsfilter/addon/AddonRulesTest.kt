@@ -2,8 +2,10 @@ package ir.smsfilter.addon
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
@@ -532,5 +534,110 @@ class AddonRulesTest {
         assertEquals(0, AddonRules.executeAll(p.ctx, rule, event(body = "کد 42", otp = "1234")))
         AddonBus.dispatch(p.ctx, event(body = "کد 42", otp = "1234"))
         assertFalse("a failed fire must not start the cooldown", p.values.containsKey("addon_fired_boom"))
+    }
+
+    // ---------- S4: success means the action ran, addon notifications get their own id ----------
+
+    /** FakePrefs plus a JVM-built ClipboardManager: the clipboard actions can actually finish here. */
+    private inner class FakeClipPrefs {
+        val prefs = FakePrefs()
+        val ctx: Context = object : ContextWrapper(null) {
+            override fun getSharedPreferences(name: String?, mode: Int) =
+                prefs.ctx.getSharedPreferences(name, mode)
+
+            override fun getSystemService(name: String): Any? =
+                if (name == Context.CLIPBOARD_SERVICE) clipboard() else null
+        }
+    }
+
+    // shortcut: android.jar only has the stub ClipboardManager() constructor, so reflection is the
+    // way to hand execute() a real instance on the JVM; upgrade to Robolectric when a fake is needed.
+    private fun clipboard(): ClipboardManager =
+        ClipboardManager::class.java.getDeclaredConstructor()
+            .apply { isAccessible = true }.newInstance() as ClipboardManager
+
+    @Test
+    fun unknownActionIsNotSuccess() {
+        val p = FakeClipPrefs()
+        assertFalse(AddonRules.execute(p.ctx, AddonRule(action = "not_a_real_action"), event()))
+    }
+
+    @Test
+    fun copyBodyOnSpamIsNotSuccess() {
+        val p = FakeClipPrefs()
+        assertFalse(AddonRules.execute(p.ctx, AddonRule(action = "copy_body"), event(isSpam = true)))
+    }
+
+    @Test
+    fun copyOtpWithoutACodeIsNotSuccess() {
+        val p = FakeClipPrefs()
+        assertFalse(AddonRules.execute(p.ctx, AddonRule(action = "copy_otp"), event(otp = null)))
+    }
+
+    @Test
+    fun copyBodyOnANormalSmsIsSuccess() {
+        val p = FakeClipPrefs()
+        assertTrue(AddonRules.execute(p.ctx, AddonRule(action = "copy_body"), event(body = "hello")))
+    }
+
+    @Test
+    fun cooldownArmsOnlyForAnActionThatRan() {
+        val p = FakeClipPrefs()
+        val noop = AddonRule(id = "noop", keywordContains = "کد", cooldownSeconds = 60,
+            actions = listOf("copy_body", "not_a_real_action"))
+        val real = AddonRule(id = "real", keywordContains = "کد", cooldownSeconds = 60, actions = listOf("copy_body"))
+        AddonRules.save(p.ctx, listOf(noop, real))
+        AddonBus.dispatch(p.ctx, event(body = "کد 42", isSpam = true))
+        assertFalse("copy_body on spam did nothing", p.prefs.values.containsKey("addon_fired_noop"))
+        AddonBus.dispatch(p.ctx, event(body = "کد 42"))
+        assertTrue("a copied body is a real fire", p.prefs.values.containsKey("addon_fired_real"))
+    }
+
+    @Test
+    fun notifyIdZeroSuppressesDismissAndModifyText() {
+        val p = FakeClipPrefs()
+        val e = SmsEvent("123", "hello", 0L, 0, 7L, false, false, null, 0)
+        assertFalse(AddonRules.execute(p.ctx, AddonRule(action = "dismiss"), e))
+        assertFalse(AddonRules.execute(p.ctx, AddonRule(action = "modify_text", actionParam = "x"), e))
+        assertEquals(0, AddonRules.executeAll(p.ctx, AddonRule(actions = listOf("dismiss", "modify_text")), e))
+        // and a rule made only of those must not arm its cooldown for an SMS that has no notification id
+        val r = AddonRule(id = "dis", keywordContains = "کد", cooldownSeconds = 60, actions = listOf("dismiss"))
+        AddonRules.save(p.ctx, listOf(r))
+        AddonBus.dispatch(p.ctx, event(body = "کد 42"))
+        assertFalse("a no-op dismiss must not arm", p.prefs.values.containsKey("addon_fired_dis"))
+    }
+
+    @Test
+    fun guardedOutActionsAreNotSuccess() {
+        val p = FakeClipPrefs()
+        p.prefs.values["addon_autoreply_text"] = ""   // blank template -> nothing to send
+        val e = SmsEvent(" ", "hello", 0L, 0, 0L, false, true, null, 0) // blank sender, threadId 0
+        assertFalse("blank forward target", AddonRules.execute(p.ctx, AddonRule(action = "forward"), e))
+        assertFalse("blank sender", AddonRules.execute(p.ctx, AddonRule(action = "block_sender"), e))
+        for (a in listOf("mark_read", "archive", "pin", "mute"))
+            assertFalse("$a without a thread", AddonRules.execute(p.ctx, AddonRule(action = a), e))
+        assertFalse("blank template", AddonRules.execute(p.ctx, AddonRule(action = "autoreply"), e.copy(sender = "123")))
+    }
+
+    @Test
+    fun alertWithoutANotificationManagerIsNotSuccess() {
+        val p = FakeClipPrefs()   // getSystemService only answers the clipboard
+        assertFalse(AddonRules.execute(p.ctx, AddonRule(action = "alert", actionParam = "x"), event()))
+    }
+
+    @Test
+    fun alertNotificationIdIsNotTheSmsNotificationId() {
+        val e = SmsEvent("123", "hello", 0L, 0, 7L, false, false, null, 2007)
+        val addon = AddonRules.addonNotifyId(e)
+        assertNotEquals("an alert must not replace the SMS notification", e.notifyId, addon)
+        assertEquals("the same conversation reuses its addon id", addon, AddonRules.addonNotifyId(e))
+        assertNotEquals(addon, AddonRules.addonNotifyId(e.copy(threadId = 8L)))
+        assertNotEquals("no thread falls back to the sender", addon, AddonRules.addonNotifyId(e.copy(threadId = 0L)))
+        // two senders without a thread must not share one addon notification
+        assertNotEquals(
+            "sender fallback must not collide",
+            AddonRules.addonNotifyId(e.copy(threadId = 0L, sender = "123")),
+            AddonRules.addonNotifyId(e.copy(threadId = 0L, sender = "456"))
+        )
     }
 }

@@ -1128,13 +1128,33 @@ class AddonRulesAdversarialTest {
     // AddonBus.dispatch calls it once per executed rule in the same loop body, so the order and
     // count of addon_fired_* writes is the order and count of rule executions.
 
-    private fun evT(body: String, threadId: Long = 7) = SmsEvent("123", body, 0L, 0, threadId, false, false, null, 0)
+    private fun evT(body: String, threadId: Long = 7) = SmsEvent("123", body, 0L, 0, threadId, false, false, "1234", 0)
 
     private fun firedWrites(p: FakePrefs) = p.writes.filter { it.startsWith("addon_fired_") }
 
+    /**
+     * FakePrefs plus a JVM-built ClipboardManager: the clipboard actions can actually finish here,
+     * which the default FakePrefs context (no services) can never do.
+     */
+    private inner class ClipPrefs {
+        val prefs = FakePrefs()
+        val ctx: Context = object : android.content.ContextWrapper(null) {
+            override fun getSharedPreferences(name: String?, mode: Int) =
+                prefs.ctx.getSharedPreferences(name, mode)
+
+            // shortcut: android.jar only has the stub ClipboardManager() constructor, so reflection
+            // is how execute() gets a real instance on the JVM; upgrade to Robolectric when a fake is needed.
+            override fun getSystemService(name: String): Any? =
+                if (name == Context.CLIPBOARD_SERVICE)
+                    android.content.ClipboardManager::class.java.getDeclaredConstructor()
+                        .apply { isAccessible = true }.newInstance() as android.content.ClipboardManager
+                else null
+        }
+    }
+
     @Test
     fun s3DispatchExecutesEveryMatchingRuleExactlyOnceInPriorityOrder() {
-        val p = prefs(null)
+        val p = ClipPrefs()
         rules(
             p.ctx,
             AddonRule(id = "C", priority = 30, keywordContains = "کد", cooldownSeconds = 60),
@@ -1144,25 +1164,105 @@ class AddonRulesAdversarialTest {
             AddonRule(id = "B", priority = 20, keywordContains = "کد", cooldownSeconds = 60)
         )
         assertEquals(listOf("A", "B", "C"), AddonRules.matching(p.ctx, evT("کد 42"), 0L).map { it.id })
-        p.writes.clear()
+        p.prefs.writes.clear()
         AddonBus.dispatch(p.ctx, evT("کد 42"))
         assertEquals(
             "each matched rule must run once, in priority order",
             listOf("addon_fired_A", "addon_fired_B", "addon_fired_C"),
-            firedWrites(p)
+            firedWrites(p.prefs)
         )
     }
 
     @Test
     fun s3CoolingRuleIsSkippedButLaterRulesStillRun() {
-        val p = prefs(null)
+        val p = ClipPrefs()
         val hot = AddonRule(id = "hot", priority = 1, keywordContains = "کد", cooldownSeconds = 3600)
         rules(p.ctx, hot, AddonRule(id = "later", priority = 2, keywordContains = "کد", cooldownSeconds = 60))
         val stamped = System.currentTimeMillis()
         AddonRules.markFired(p.ctx, hot, stamped)
-        p.writes.clear()
+        p.prefs.writes.clear()
         AddonBus.dispatch(p.ctx, evT("کد 42"))
-        assertEquals("cooling rule must not execute, the next one must", listOf("addon_fired_later"), firedWrites(p))
-        assertEquals("cooling rule keeps its original timestamp", stamped, p.values["addon_fired_hot"])
+        assertEquals("cooling rule must not execute, the next one must", listOf("addon_fired_later"), firedWrites(p.prefs))
+        assertEquals("cooling rule keeps its original timestamp", stamped, p.prefs.values["addon_fired_hot"])
+    }
+
+    // ================= S4: dispatch placement + cooldown armed only on success =================
+    // The default FakePrefs context has no services, so copy_otp can never succeed there. ClipPrefs
+    // makes copy_body/copy_otp real successes, so these fixtures can tell "ran" from "did nothing".
+
+    @Test
+    fun s4PartialSuccessArmsTheCooldown() {
+        val p = ClipPrefs()
+        // copy_body really copies; copy_otp has no code, so it is a silent no-op that must not count
+        val r = AddonRule(id = "part", keywordContains = "کد", cooldownSeconds = 60,
+            actions = listOf("copy_body", "copy_otp"))
+        rules(p.ctx, r)
+        val e = SmsEvent("123", "کد 42", 0L, 0, 7L, false, false, null, 0)
+        assertEquals("only the action that ran counts", 1, AddonRules.executeAll(p.ctx, r, e))
+        p.prefs.writes.clear()
+        AddonBus.dispatch(p.ctx, e)
+        assertTrue("a partly successful rule must arm", p.prefs.values.containsKey("addon_fired_part"))
+        assertFalse("armed means blocked inside the window", AddonRules.allowedNow(p.ctx, r, System.currentTimeMillis()))
+    }
+
+    @Test
+    fun s4AllFailedActionsKeepTheRetryWindowOpen() {
+        val p = prefs(null)
+        // no clipboard service and no code: copy_otp cannot do anything here
+        val r = AddonRule(id = "dead", keywordContains = "کد", cooldownSeconds = 60,
+            actions = listOf("copy_otp"))
+        rules(p.ctx, r)
+        val e = SmsEvent("123", "کد 42", 0L, 0, 7L, false, true, "1234", 2001)
+        assertEquals(0, AddonRules.executeAll(p.ctx, r, e))
+        AddonBus.dispatch(p.ctx, e)
+        assertFalse("a total failure must not arm", p.values.containsKey("addon_fired_dead"))
+        assertTrue("the next SMS must get a retry", AddonRules.allowedNow(p.ctx, r, System.currentTimeMillis()))
+    }
+
+    @Test
+    fun s4CoolingRuleStaysBlockedAfterAFailedSweep() {
+        val p = prefs(null)
+        val r = AddonRule(id = "cool", keywordContains = "کد", cooldownSeconds = 3600,
+            actions = listOf("copy_otp"))
+        rules(p.ctx, r)
+        val t0 = System.currentTimeMillis() - 1_000L
+        AddonRules.markFired(p.ctx, r, t0)
+        val e = SmsEvent("123", "کد 42", 0L, 0, 7L, false, true, "1234", 2001)
+        AddonBus.dispatch(p.ctx, e)
+        assertEquals("a failed sweep must not refresh or clear the window", t0, p.values["addon_fired_cool"])
+        assertFalse("still cooling", AddonRules.allowedNow(p.ctx, r, System.currentTimeMillis()))
+        assertTrue("window still ends when it should", AddonRules.allowedNow(p.ctx, r, t0 + 3_600_000L))
+    }
+
+    /**
+     * FIXED in S4: executeAll counts real effects, not "did not throw". An action whose own guard is
+     * false (copy_body on spam, unknown action name) leaves the cooldown unarmed, so the rule still
+     * fires on the next SMS instead of blocking itself for the whole window.
+     */
+    @Test
+    fun s4NoOpActionDoesNotCountAsSuccessAndDoesNotArm() {
+        val p = ClipPrefs()
+        val r = AddonRule(id = "noop", keywordContains = "کد", cooldownSeconds = 60,
+            actions = listOf("copy_body", "not_a_real_action"))
+        rules(p.ctx, r)
+        val e = SmsEvent("123", "کد 42", 0L, 0, 7L, true, false, null, 0) // isSpam -> copy_body is a no-op
+        assertEquals("neither action did anything", 0, AddonRules.executeAll(p.ctx, r, e))
+        AddonBus.dispatch(p.ctx, e)
+        assertFalse("a rule that did nothing must not arm", p.prefs.values.containsKey("addon_fired_noop"))
+        assertTrue("the next SMS must retry", AddonRules.allowedNow(p.ctx, r, System.currentTimeMillis()))
+    }
+
+    @Test
+    fun s4FailedRuleDoesNotStopTheNextRuleFromArming() {
+        val p = ClipPrefs()
+        rules(
+            p.ctx,
+            // no code on the event: copy_otp is a silent no-op, and the rule around it must not arm
+            AddonRule(id = "bad", priority = 1, keywordContains = "کد", cooldownSeconds = 60, actions = listOf("copy_otp")),
+            AddonRule(id = "good", priority = 2, keywordContains = "کد", cooldownSeconds = 60, actions = listOf("copy_body"))
+        )
+        AddonBus.dispatch(p.ctx, SmsEvent("123", "کد 42", 0L, 0, 0L, false, false, null, 0))
+        assertFalse("failed rule stays unarmed", p.prefs.values.containsKey("addon_fired_bad"))
+        assertTrue("the rule after it still fires", p.prefs.values.containsKey("addon_fired_good"))
     }
 }

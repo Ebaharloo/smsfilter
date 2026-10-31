@@ -121,78 +121,86 @@ class IncomingSms : BroadcastReceiver() {
         val decision = ir.smsfilter.core.InboxPolicy.notifyFor(muted, isSpam)
 
         val nm = ctx.getSystemService(NotificationManager::class.java)
-        if (!channelsReady) {
-            nm.createNotificationChannel(NotificationChannel(CHANNEL, "Messages", NotificationManager.IMPORTANCE_HIGH))
-            nm.createNotificationChannel(NotificationChannel(ADS_CHANNEL, "Filtered ads", NotificationManager.IMPORTANCE_LOW))
-            channelsReady = true
-        }
 
         // addon actions must see the notification the app just posted for this SMS, so they run after
         // every notify() below - and exactly once per message, on each of the three paths.
         val notifyId = NOTIF_ID + address.hashCode()
-        val event = SmsEvent(address, body, date, subId, threadId, isSpam, fromContact, otpOf(body), notifyId)
-
-        if (decision == ir.smsfilter.core.Notify.DIGEST) {
-            // one low-priority digest, updated in place - 50 ads/hour must not mean 50 notifications
-            val digest = ctx.getSharedPreferences("digest", Context.MODE_PRIVATE)
-            val count = digest.getInt("count", 0) + 1
-            digest.edit().putInt("count", count).putString("last", body).apply()
-            nm.notify(ADS_ID, NotificationCompat.Builder(ctx, ADS_CHANNEL)
-                .setSmallIcon(android.R.drawable.stat_notify_chat)
-                .setContentTitle(ir.smsfilter.core.InboxPolicy.digestTitle(count))
-                .setContentText(body.take(60))
-                .setContentIntent(open(ctx, null))
-                .setAutoCancel(true)
-                .setOnlyAlertOnce(true)
-                .build())
-            AddonBus.dispatch(ctx, event)
-            return
-        }
-
-        if (decision == ir.smsfilter.core.Notify.SILENT) {
-            // conversation muted by the user: message is stored, notification suppressed
-            AddonBus.dispatch(ctx, event)
-            return
-        }
-
-        val reply = RemoteInput.Builder(KEY_REPLY).setLabel("Reply").build()
-        val replyIntent = PendingIntent.getBroadcast(
-            ctx, 10, Intent(ctx, IncomingSms::class.java).apply {
-                action = ACTION_REPLY
-                putExtra("address", address)
-                putExtra("id", notifyId)
-            }, PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val readIntent = PendingIntent.getBroadcast(
-            ctx, 11, Intent(ctx, IncomingSms::class.java).apply {
-                action = ACTION_MARK_READ
-                putExtra("thread", threadId)
-                putExtra("id", notifyId)
-            }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        // Only the normal path posts under notifyId: digest posts ADS_ID and silent posts nothing, so
+        // a dismiss rule there must not cancel an older notification from the same sender.
+        val event = SmsEvent(
+            address, body, date, subId, threadId, isSpam, fromContact, otpOf(body),
+            if (decision == ir.smsfilter.core.Notify.NORMAL) notifyId else 0
         )
 
-        val builder = NotificationCompat.Builder(ctx, CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
-            .setContentTitle(if (address.isBlank()) "پیام جدید" else address)
-            .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setContentIntent(open(ctx, address))
-            .setAutoCancel(true)
-            .addAction(0, "Reply", replyIntent)
-            .addAction(0, "Mark read", readIntent)
+        // A failed notification must never cost the SMS its addon rules: notify stays best-effort.
+        try {
+            if (!channelsReady) {
+                nm.createNotificationChannel(NotificationChannel(CHANNEL, "Messages", NotificationManager.IMPORTANCE_HIGH))
+                nm.createNotificationChannel(NotificationChannel(ADS_CHANNEL, "Filtered ads", NotificationManager.IMPORTANCE_LOW))
+                channelsReady = true
+            }
 
-        // OTP codes are the one thing worth a one-tap action
-        otpOf(body)?.let { code ->
-            val copyIntent = PendingIntent.getBroadcast(
-                ctx, 12, Intent(ctx, OtpCopyReceiver::class.java).apply {
-                    action = ACTION_COPY_OTP
-                    putExtra("code", code)
-                }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-            builder.addAction(0, "Copy code $code", copyIntent)
+            when (decision) {
+                ir.smsfilter.core.Notify.DIGEST -> {
+                    // one low-priority digest, updated in place - 50 ads/hour must not mean 50 notifications
+                    val digest = ctx.getSharedPreferences("digest", Context.MODE_PRIVATE)
+                    val count = digest.getInt("count", 0) + 1
+                    digest.edit().putInt("count", count).putString("last", body).apply()
+                    nm.notify(ADS_ID, NotificationCompat.Builder(ctx, ADS_CHANNEL)
+                        .setSmallIcon(android.R.drawable.stat_notify_chat)
+                        .setContentTitle(ir.smsfilter.core.InboxPolicy.digestTitle(count))
+                        .setContentText(body.take(60))
+                        .setContentIntent(open(ctx, null))
+                        .setAutoCancel(true)
+                        .setOnlyAlertOnce(true)
+                        .build())
+                }
+                // conversation muted by the user: message is stored, notification suppressed
+                ir.smsfilter.core.Notify.SILENT -> Unit
+                else -> {
+                    val reply = RemoteInput.Builder(KEY_REPLY).setLabel("Reply").build()
+                    val replyIntent = PendingIntent.getBroadcast(
+                        ctx, 10, Intent(ctx, IncomingSms::class.java).apply {
+                            action = ACTION_REPLY
+                            putExtra("address", address)
+                            putExtra("id", notifyId)
+                        }, PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                    )
+                    val readIntent = PendingIntent.getBroadcast(
+                        ctx, 11, Intent(ctx, IncomingSms::class.java).apply {
+                            action = ACTION_MARK_READ
+                            putExtra("thread", threadId)
+                            putExtra("id", notifyId)
+                        }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                    )
+
+                    val builder = NotificationCompat.Builder(ctx, CHANNEL)
+                        .setSmallIcon(android.R.drawable.stat_notify_chat)
+                        .setContentTitle(if (address.isBlank()) "پیام جدید" else address)
+                        .setContentText(body)
+                        .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                        .setContentIntent(open(ctx, address))
+                        .setAutoCancel(true)
+                        .addAction(0, "Reply", replyIntent)
+                        .addAction(0, "Mark read", readIntent)
+
+                    // OTP codes are the one thing worth a one-tap action
+                    otpOf(body)?.let { code ->
+                        val copyIntent = PendingIntent.getBroadcast(
+                            ctx, 12, Intent(ctx, OtpCopyReceiver::class.java).apply {
+                                action = ACTION_COPY_OTP
+                                putExtra("code", code)
+                            }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                        )
+                        builder.addAction(0, "Copy code $code", copyIntent)
+                    }
+
+                    nm.notify(notifyId, builder.build())
+                }
+            }
+        } catch (t: Throwable) {
+            android.util.Log.e("SMSFilter", "notify failed", t)
         }
-
-        nm.notify(notifyId, builder.build())
         AddonBus.dispatch(ctx, event)
     }
 

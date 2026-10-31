@@ -56,6 +56,7 @@ object AddonRules {
     private const val MAX_REGEX_SUBJECT = 200
     private const val MAX_PATTERN_LEN = 120
     private const val MAX_QUANTIFIERS = 2
+    private const val ADDON_NOTIF_ID = 3000
     private val GROUP_PREFIX = Regex("\\(\\?[:=!<]")
     private val NESTED_QUANTIFIER = Regex("\\([^)]*[+*?|][^)]*\\)\\s*[+*{]")
 
@@ -266,8 +267,7 @@ object AddonRules {
         for (a in rule.actions.ifEmpty { listOf(rule.action) }) {
             // One dead action (no email app, provider refusing the send) must not eat the rest of the rule.
             try {
-                execute(ctx, rule.copy(action = a), event, dryRun)
-                ok++
+                if (execute(ctx, rule.copy(action = a), event, dryRun)) ok++
             } catch (t: Throwable) {
                 Log.e("AddonRules", "action $a of rule ${rule.id} failed", t)
             }
@@ -275,94 +275,134 @@ object AddonRules {
         return ok
     }
 
-    fun execute(ctx: Context, rule: AddonRule, event: SmsEvent, dryRun: Boolean = false) {
+    // Success means "did the thing", not "did not throw": a guarded-out action must leave the cooldown
+    // unarmed, or a rule that did nothing blocks itself for its whole window.
+    fun execute(ctx: Context, rule: AddonRule, event: SmsEvent, dryRun: Boolean = false): Boolean {
         if (dryRun) {
             android.util.Log.d("AddonSelfTest", "dry-run action=${rule.action}")
-            return
+            return true
         }
-        when (rule.action) {
-            "copy_otp" -> event.otp?.let { code ->
-                val cm = ctx.getSystemService(ClipboardManager::class.java)
-                cm?.setPrimaryClip(ClipData.newPlainText("code", code))
-                Toast.makeText(ctx, "کد $code کپی شد", Toast.LENGTH_SHORT).show()
+        return when (rule.action) {
+            "copy_otp" -> {
+                val code = event.otp
+                if (code == null) false else {
+                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    if (cm == null) false else {
+                        cm.setPrimaryClip(ClipData.newPlainText("code", code))
+                        safeToast(ctx, "کد $code کپی شد")
+                        true
+                    }
+                }
             }
-            "copy_body" -> if (!event.isSpam) {
-                val cm = ctx.getSystemService(ClipboardManager::class.java)
-                cm?.setPrimaryClip(ClipData.newPlainText("sms", event.body))
-                Toast.makeText(ctx, "متن پیام کپی شد", Toast.LENGTH_SHORT).show()
+            "copy_body" -> {
+                if (event.isSpam) false else {
+                    val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    if (cm == null) false else {
+                        cm.setPrimaryClip(ClipData.newPlainText("sms", event.body))
+                        safeToast(ctx, "متن پیام کپی شد")
+                        true
+                    }
+                }
             }
             "autoreply" -> if (!event.isSpam && event.fromContact && event.sender.isNotBlank()) {
                 val template = rule.actionParam.ifBlank {
                     ctx.getSharedPreferences(FilterService.PREFS, Context.MODE_PRIVATE)
                         .getString("addon_autoreply_text", "پیام شما دریافت شد").orEmpty()
                 }
-                if (template.isNotBlank()) Sms.send(ctx, event.sender, template)
-            }
+                if (template.isBlank()) false else {
+                    Sms.send(ctx, event.sender, template)
+                    true
+                }
+            } else false
             "forward" -> if (rule.actionParam.isNotBlank()) {
                 Sms.send(ctx, rule.actionParam, event.body)
-            }
+                true
+            } else false
             "mark_read" -> if (event.threadId > 0) {
                 Sms.markThreadRead(ctx, event.threadId)
-            }
+                true
+            } else false
             "mute" -> if (event.threadId > 0 && !ThreadFlags.isMuted(ctx, event.threadId)) {
                 ThreadFlags.toggleMute(ctx, event.threadId)
-            }
+                true
+            } else false
             "unmute" -> if (event.threadId > 0 && ThreadFlags.isMuted(ctx, event.threadId)) {
                 ThreadFlags.toggleMute(ctx, event.threadId)
-            }
+                true
+            } else false
             "pin" -> if (event.threadId > 0 && !ThreadFlags.isPinned(ctx, event.threadId)) {
                 ThreadFlags.togglePin(ctx, event.threadId)
-            }
+                true
+            } else false
             "unpin" -> if (event.threadId > 0 && ThreadFlags.isPinned(ctx, event.threadId)) {
                 ThreadFlags.togglePin(ctx, event.threadId)
-            }
+                true
+            } else false
             "archive" -> if (event.threadId > 0) {
                 ThreadFlags.setArchived(ctx, event.threadId, true)
-            }
+                true
+            } else false
             "unarchive" -> if (event.threadId > 0) {
                 ThreadFlags.setArchived(ctx, event.threadId, false)
-            }
+                true
+            } else false
             "quarantine" -> if (event.threadId > 0) {
                 ThreadFlags.quarantine(ctx, event.threadId)
-            }
+                true
+            } else false
             "restore" -> if (event.threadId > 0) {
                 ThreadFlags.restore(ctx, event.threadId)
-            }
+                true
+            } else false
             "block_sender" -> if (event.sender.isNotBlank()) {
                 Learned(ctx).blockSender(event.sender)
-            }
+                true
+            } else false
+            // notifyId 0 means this SMS was never posted under an id (digest/silent path): nothing to cancel.
             "dismiss" -> if (event.notifyId > 0) {
                 ctx.getSystemService(NotificationManager::class.java)?.cancel(event.notifyId)
-            }
+                true
+            } else false
             "modify_text" -> if (event.notifyId > 0) {
                 ctx.getSystemService(NotificationManager::class.java)?.cancel(event.notifyId)
                 postAddonNotification(ctx, event, rule.actionParam.ifBlank { event.body }, true)
-            }
+            } else false
             "alert" -> postAddonNotification(ctx, event, rule.actionParam.ifBlank { event.body }, true)
             "email" -> {
                 val to = rule.emailTo.ifBlank { rule.actionParam }.trim()
                 val subject = template(rule.emailSubject, event).ifBlank { "SMS from ${event.sender}" }
                 val body = template(rule.emailBody, event).ifBlank { event.body }
-                if (to.isNotBlank()) {
-                    try {
-                        val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                            type = "message/rfc822"
-                            putExtra(android.content.Intent.EXTRA_EMAIL, arrayOf(to))
-                            putExtra(android.content.Intent.EXTRA_SUBJECT, subject)
-                            putExtra(android.content.Intent.EXTRA_TEXT, body)
-                            if (rule.emailAppPackage.isNotBlank()) setPackage(rule.emailAppPackage)
-                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                        }
-                        if (rule.emailAppPackage.isBlank()) {
-                            ctx.startActivity(android.content.Intent.createChooser(intent, "Send email"))
-                        } else {
-                            ctx.startActivity(intent)
-                        }
-                    } catch (t: Throwable) {
-                        android.widget.Toast.makeText(ctx, "No email app available", android.widget.Toast.LENGTH_SHORT).show()
+                if (to.isBlank()) false else try {
+                    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "message/rfc822"
+                        putExtra(android.content.Intent.EXTRA_EMAIL, arrayOf(to))
+                        putExtra(android.content.Intent.EXTRA_SUBJECT, subject)
+                        putExtra(android.content.Intent.EXTRA_TEXT, body)
+                        if (rule.emailAppPackage.isNotBlank()) setPackage(rule.emailAppPackage)
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
+                    if (rule.emailAppPackage.isBlank()) {
+                        ctx.startActivity(android.content.Intent.createChooser(intent, "Send email"))
+                    } else {
+                        ctx.startActivity(intent)
+                    }
+                    true
+                } catch (t: Throwable) {
+                    safeToast(ctx, "No email app available")
+                    false
                 }
             }
+            // An unknown/mistyped action name did nothing.
+            else -> false
+        }
+    }
+
+    // The clipboard write is the effect; a Toast that cannot be built must not turn it into a failed fire.
+    private fun safeToast(ctx: Context, text: String) {
+        try {
+            Toast.makeText(ctx, text, Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            Log.w("AddonRules", "toast failed", t)
         }
     }
 
@@ -409,8 +449,13 @@ object AddonRules {
             .replace("{otp}", event.otp.orEmpty())
     }
 
-    private fun postAddonNotification(ctx: Context, event: SmsEvent, text: String, sound: Boolean) {
-        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return
+    // Addon notifications get their own id space: an alert must never replace the SMS notification the
+    // app posted under NOTIF_ID, and one id per conversation keeps the same sender from colliding.
+    internal fun addonNotifyId(event: SmsEvent): Int =
+        ADDON_NOTIF_ID + (event.threadId.takeIf { it > 0 }?.toInt() ?: event.sender.hashCode())
+
+    private fun postAddonNotification(ctx: Context, event: SmsEvent, text: String, sound: Boolean): Boolean {
+        val nm = ctx.getSystemService(NotificationManager::class.java) ?: return false
         val channelId = "addon_actions"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(NotificationChannel(channelId, "Addon actions", NotificationManager.IMPORTANCE_DEFAULT))
@@ -421,7 +466,7 @@ object AddonRules {
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .apply { if (sound) setDefaults(android.app.Notification.DEFAULT_ALL) }
             .build()
-        val id = if (event.notifyId > 0) event.notifyId else (event.threadId.toInt().takeIf { it > 0 } ?: 1)
-        nm.notify(id, n)
+        nm.notify(addonNotifyId(event), n)
+        return true
     }
 }
