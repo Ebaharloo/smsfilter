@@ -944,7 +944,7 @@ fun FeaturesPage() {
 
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Features", style = MaterialTheme.typography.titleMedium)
-        Text("BuzzKill-style SMS rules. First matching rule wins. Core filtering stays untouched.",
+        Text("BuzzKill-style SMS rules. Every matching rule runs, in priority order. Core filtering stays untouched.",
             style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = {
@@ -1012,12 +1012,15 @@ private fun conditionSummary(rule: AddonRule): String {
     if (rule.maxLength > 0) parts += "length <= ${rule.maxLength}"
     if (rule.daysOfWeek.isNotBlank()) parts += "days ${rule.daysOfWeek}"
     if (rule.startHour >= 0 && rule.endHour >= 0) parts += "hours ${rule.startHour}-${rule.endHour}"
-    if (parts.isEmpty()) return "any SMS"
+    if (parts.isEmpty()) return if (rule.matchAny) "any SMS" else "no conditions — never fires"
     return parts.joinToString(" AND ")
 }
 
-private fun actionSummary(rule: AddonRule): String =
-    rule.action + if (rule.actionParam.isNotBlank()) " (${rule.actionParam})" else ""
+private fun actionSummary(rule: AddonRule): String {
+    val base = rule.actions.ifEmpty { listOf(rule.action) }.joinToString(" + ") +
+        if (rule.actionParam.isNotBlank()) " (${rule.actionParam})" else ""
+    return if (rule.cooldownSeconds > 0) "$base · max once per ${rule.cooldownSeconds}s" else base
+}
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -1039,7 +1042,9 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
     var days by remember { mutableStateOf(rule.daysOfWeek) }
     var startHour by remember { mutableStateOf(if (rule.startHour >= 0) rule.startHour.toString() else "") }
     var endHour by remember { mutableStateOf(if (rule.endHour >= 0) rule.endHour.toString() else "") }
-    var action by remember { mutableStateOf(rule.action) }
+    var actions by remember { mutableStateOf(rule.actions.ifEmpty { listOf(rule.action) }) }
+    var cooldown by remember { mutableStateOf(if (rule.cooldownSeconds > 0) rule.cooldownSeconds.toString() else "") }
+    var matchAny by remember { mutableStateOf(rule.matchAny) }
     var param by remember { mutableStateOf(rule.actionParam) }
     var emailTo by remember { mutableStateOf(rule.emailTo) }
     var emailSubject by remember { mutableStateOf(rule.emailSubject) }
@@ -1055,6 +1060,12 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
 
     var dialog by remember { mutableStateOf<String?>(null) }
     var dialogValue by remember { mutableStateOf("") }
+
+    // `action` drives which parameter fields to show: the first chip is the primary action.
+    val action = actions.firstOrNull() ?: rule.action
+    // An unusable pattern (typed before the Regex chip was toggled, or imported from JSON) would
+    // never fire at runtime, so the outer Save refuses it too, not just the keyword dialog.
+    val badRegex = if (keywordRegex) keywords.filter { it.isNotBlank() && !AddonRules.regexUsable(it) } else emptyList()
 
     fun openDialog(key: String, initial: String) {
         dialog = key
@@ -1093,13 +1104,21 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                     FilterChip(selected = days.isNotBlank() || startHour.isNotBlank() || endHour.isNotBlank(),
                         onClick = { openDialog("time", listOf(days, startHour, endHour).joinToString("|")) },
                         label = { Text(if (days.isBlank() && startHour.isBlank() && endHour.isBlank()) "Time…" else "Time ${days.ifBlank{"*"}} ${startHour.ifBlank{"0"}}-${endHour.ifBlank{"23"}}") })
+                    // Zero conditions is inert by default, so "every SMS" has to be asked for.
+                    FilterChip(selected = matchAny, onClick = { matchAny = !matchAny },
+                        label = { Text("Any SMS") })
                 }
                 Text("THEN", style = MaterialTheme.typography.labelLarge)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("copy_otp", "copy_body", "autoreply", "forward", "mark_read", "mute", "unmute", "pin", "unpin",
                         "archive", "unarchive", "quarantine", "restore", "block_sender", "dismiss", "modify_text", "alert", "email")
                         .forEach { a ->
-                            FilterChip(selected = action == a, onClick = { action = a }, label = { Text(a) })
+                            FilterChip(selected = a in actions, onClick = {
+                                // At least one action must stay selected: a rule that does nothing is not a rule.
+                                actions = if (a in actions) {
+                                    if (actions.size > 1) actions - a else actions
+                                } else actions + a
+                            }, label = { Text(a) })
                         }
                 }
                 if (action == "email") {
@@ -1118,14 +1137,19 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                         label = { Text(if (action == "autoreply") "Reply text" else if (action == "forward") "Forward number" else "Text") },
                         modifier = Modifier.fillMaxWidth())
                 }
+                OutlinedTextField(value = cooldown, onValueChange = { cooldown = it.filter { c -> c.isDigit() } },
+                    label = { Text("Cooldown seconds (0 = every time)") }, modifier = Modifier.fillMaxWidth())
+                if (badRegex.isNotEmpty()) {
+                    Text("regex unusable, will never match: ${badRegex.joinToString(" | ")}",
+                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Enabled"); Switch(checked = enabled, onCheckedChange = { enabled = it })
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                val (min, max) = if (dialog == "length") Pair("", "") else Pair(minLength, maxLength)
+            TextButton(enabled = badRegex.isEmpty(), onClick = {
                 onSave(rule.copy(
                     name = name,
                     senderContains = sender,
@@ -1142,8 +1166,11 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                     onlySpam = spamOnly,
                     onlyNotSpam = notSpamOnly,
                     otpRequired = when (otpMode) { 1 -> true; 2 -> false; else -> null },
-                    action = action,
+                    action = actions.first(),
+                    actions = actions,
                     actionParam = param,
+                    cooldownSeconds = cooldown.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+                    matchAny = matchAny,
                     emailTo = emailTo.trim(),
                     emailSubject = emailSubject,
                     emailBody = emailBody,

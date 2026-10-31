@@ -41,7 +41,14 @@ data class AddonRule(
     val emailBody: String = "",
     val emailAppPackage: String = "",
     val action: String = "copy_otp",
-    val actionParam: String = ""
+    val actionParam: String = "",
+    // BuzzKill MultiTool: one rule fires several actions, in this order. `action` stays the primary
+    // (and the only one for every rule saved before this field existed).
+    val actions: List<String> = emptyList(),
+    val cooldownSeconds: Int = 0,
+    // BuzzKill runs a trigger on rules that name no condition; this app refuses that by default
+    // so a half-written rule cannot swallow every SMS.
+    val matchAny: Boolean = false
 )
 
 object AddonRules {
@@ -89,7 +96,13 @@ object AddonRules {
                     emailBody = o.optString("emailBody", ""),
                     emailAppPackage = o.optString("emailAppPackage", ""),
                     action = o.optString("action", "copy_otp"),
-                    actionParam = o.optString("actionParam", "")
+                    actionParam = o.optString("actionParam", ""),
+                    actions = run {
+                        val a = o.optJSONArray("actions")
+                        (0 until (a?.length() ?: 0)).mapNotNull { i -> a?.opt(i) as? String }
+                    },
+                    cooldownSeconds = o.optInt("cooldownSeconds", 0),
+                    matchAny = o.optBoolean("matchAny", false)
                 )
             }
             out
@@ -127,6 +140,9 @@ object AddonRules {
             o.put("emailAppPackage", r.emailAppPackage)
             o.put("action", r.action)
             o.put("actionParam", r.actionParam)
+            o.put("actions", JSONArray(r.actions))
+            o.put("cooldownSeconds", r.cooldownSeconds)
+            o.put("matchAny", r.matchAny)
             arr.put(o)
         }
         ctx.getSharedPreferences(FilterService.PREFS, Context.MODE_PRIVATE)
@@ -157,6 +173,25 @@ object AddonRules {
 
     fun matches(rule: AddonRule, event: SmsEvent, nowMillis: Long = System.currentTimeMillis()): Boolean {
         if (!rule.enabled) return false
+        val active = conditions(rule, event, nowMillis)
+        // An empty list means "no condition" here (true); matching() is what keeps such a rule inert.
+        return active.isEmpty() || active.all { it }
+    }
+
+    // BuzzKill RuleFinder.b: every rule is tested, matching ones run in priority order.
+    fun matching(ctx: Context, event: SmsEvent, nowMillis: Long = System.currentTimeMillis()): List<AddonRule> {
+        ensureDefaults(ctx)
+        // sortedBy is stable, so equal priorities keep their saved order.
+        return load(ctx).sortedBy { it.priority }.filter { rule ->
+            if (!rule.enabled) return@filter false
+            val active = conditions(rule, event, nowMillis)
+            (active.isNotEmpty() || rule.matchAny) && active.all { it }
+        }
+    }
+
+    // The conditions matches() evaluates. A raw-blank value is skipped here, which is why a
+    // spaces-only keyword counts as "no condition" and therefore makes the rule inert.
+    private fun conditions(rule: AddonRule, event: SmsEvent, nowMillis: Long): MutableList<Boolean> {
         val cal = java.util.Calendar.getInstance().apply { timeInMillis = nowMillis }
         val active = mutableListOf<Boolean>()
         if (rule.senderContains.isNotBlank()) {
@@ -206,14 +241,35 @@ object AddonRules {
         if (rule.otpRequired == true) active += event.otp != null
         if (rule.otpRequired == false) active += event.otp == null
 
-        if (active.isEmpty()) return true
-        // BuzzKill semantics: every specified condition must hold.
-        return active.all { it }
+        return active
     }
 
-    fun firstMatch(ctx: Context, event: SmsEvent): AddonRule? {
-        ensureDefaults(ctx)
-        return load(ctx).sortedBy { it.priority }.firstOrNull { matches(it, event) }
+    private fun firedKey(rule: AddonRule) = "addon_fired_${rule.id}"
+
+    // 0 = every time. The last fire is read from prefs, so a process restart cannot re-arm a window
+    // that is still running.
+    fun allowedNow(ctx: Context, rule: AddonRule, nowMillis: Long): Boolean {
+        if (rule.cooldownSeconds <= 0) return true
+        val last = ctx.getSharedPreferences(FilterService.PREFS, Context.MODE_PRIVATE)
+            .getLong(firedKey(rule), 0L)
+        return last == 0L || nowMillis - last >= rule.cooldownSeconds * 1000L
+    }
+
+    fun markFired(ctx: Context, rule: AddonRule, nowMillis: Long) {
+        if (rule.cooldownSeconds <= 0) return
+        ctx.getSharedPreferences(FilterService.PREFS, Context.MODE_PRIVATE)
+            .edit().putLong(firedKey(rule), nowMillis).apply()
+    }
+
+    fun executeAll(ctx: Context, rule: AddonRule, event: SmsEvent, dryRun: Boolean = false) {
+        for (a in rule.actions.ifEmpty { listOf(rule.action) }) {
+            // One dead action (no email app, provider refusing the send) must not eat the rest of the rule.
+            try {
+                execute(ctx, rule.copy(action = a), event, dryRun)
+            } catch (t: Throwable) {
+                Log.e("AddonRules", "action $a of rule ${rule.id} failed", t)
+            }
+        }
     }
 
     fun execute(ctx: Context, rule: AddonRule, event: SmsEvent, dryRun: Boolean = false) {

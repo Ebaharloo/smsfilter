@@ -45,19 +45,29 @@ object AddonBus {
     }
 
     fun dispatch(ctx: Context, event: SmsEvent) {
-        AddonRules.ensureDefaults(ctx)
-        val rule = AddonRules.firstMatch(ctx, event)
-        if (rule != null) {
-            AddonRules.execute(ctx, rule, event)
+        val now = System.currentTimeMillis()
+        val matched = AddonRules.matching(ctx, event, now)
+        if (matched.isEmpty()) {
+            // No rule claims this SMS: the legacy per-toggle actions still run, unchanged.
+            for (a in actions.toList()) {
+                if (!a.enabled(ctx)) continue
+                try {
+                    a.onSmsReceived(ctx, event)
+                } catch (t: Throwable) {
+                    Log.e("SMSAddon", "action ${a.id} failed", t)
+                }
+            }
             return
         }
-        for (a in actions.toList()) {
-            if (!a.enabled(ctx)) continue
+        for (rule in matched) {
+            if (!AddonRules.allowedNow(ctx, rule, now)) continue
+            // One failing rule must not stop the rules after it.
             try {
-                a.onSmsReceived(ctx, event)
+                AddonRules.executeAll(ctx, rule, event)
             } catch (t: Throwable) {
-                Log.e("SMSAddon", "action ${a.id} failed", t)
+                Log.e("SMSAddon", "rule ${rule.id} failed", t)
             }
+            AddonRules.markFired(ctx, rule, now)
         }
     }
 }

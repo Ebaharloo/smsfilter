@@ -21,7 +21,8 @@ Out of scope: screen/DND/BT/geofence/foreground-app conditions, batch/summarize/
 |---|---|---|
 | S0 gap matrix | running | scout on APK, writes `BUZZKILL-GAP.md` |
 | S1 normalize | **PASS**, committed `585ebf2` | 86 JVM tests, 0 failed; `TEST-S1.md`; defect (empty-normalized term matched every SMS) found by test team and fixed |
-| S2 keyword list | next | not started |
+| S2 keyword list + regex | **PASS**, committed `c4daf44` | 131 JVM tests; `TEST-S2.md`; ReDoS (2 s/rule) found by test team, capped; residual: 2-quantifier O(n²) ~28 ms, 200-char subject cap |
+| S3 all rules + cooldown | next | not started |
 
 ## Teams
 

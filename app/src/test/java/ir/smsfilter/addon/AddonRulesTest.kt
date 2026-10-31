@@ -1,8 +1,13 @@
 package ir.smsfilter.addon
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.SharedPreferences
+import java.lang.reflect.Proxy
 
 class AddonRulesTest {
     private fun event(
@@ -396,4 +401,125 @@ class AddonRulesTest {
         assertTrue("worst allowed construct took ${worst}ms, budget 100ms", worst < 100 && plain < 100)
     }
 
+    // ---------- S3: every matching rule, multi-action, cooldown, inert empty rules ----------
+
+    /** Minimal proxy Context: AddonRules only ever asks for SharedPreferences. */
+    private class FakePrefs {
+        val values = mutableMapOf<String, Any?>()
+        var editor: SharedPreferences.Editor? = null
+        val ctx: Context = run {
+            editor = Proxy.newProxyInstance(
+                AddonRulesTest::class.java.classLoader,
+                arrayOf(SharedPreferences.Editor::class.java)
+            ) { _, m, a ->
+                when (m.name) {
+                    "putString", "putBoolean", "putInt", "putLong", "putFloat", "putStringSet" -> {
+                        values[a[0] as String] = a[1]; editor
+                    }
+                    "remove" -> { values.remove(a[0] as String); editor }
+                    "clear" -> { values.clear(); editor }
+                    "commit" -> true
+                    else -> null
+                }
+            } as SharedPreferences.Editor
+            val sp = Proxy.newProxyInstance(
+                AddonRulesTest::class.java.classLoader,
+                arrayOf(SharedPreferences::class.java)
+            ) { _, m, a ->
+                when (m.name) {
+                    "getString" -> values[a[0] as String] as? String
+                    "getBoolean" -> values[a[0] as String] as? Boolean ?: (a.getOrNull(1) as? Boolean ?: false)
+                    "getLong" -> values[a[0] as String] as? Long ?: (a.getOrNull(1) as? Long ?: 0L)
+                    "contains" -> values.containsKey(a[0] as String)
+                    "edit" -> editor
+                    else -> null
+                }
+            } as SharedPreferences
+            object : ContextWrapper(null) {
+                override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences = sp
+            }
+        }
+    }
+
+    private fun rules(p: FakePrefs, vararg r: AddonRule) = AddonRules.save(p.ctx, r.toList())
+
+    @Test
+    fun everyMatchingRuleIsReturnedInPriorityOrder() {
+        val p = FakePrefs()
+        rules(p,
+            AddonRule(id = "late", priority = 5, keywordContains = "کد"),
+            AddonRule(id = "first", priority = 1, keywordContains = "کد"),
+            AddonRule(id = "miss", priority = 2, keywordContains = "zzz"),
+            AddonRule(id = "tie", priority = 1, senderContains = "123")
+        )
+        // equal priorities keep their saved order: sortedBy is stable
+        assertEquals(listOf("first", "tie", "late"), AddonRules.matching(p.ctx, event(body = "کد 42"), 0L).map { it.id })
+    }
+
+    @Test
+    fun zeroConditionRuleIsInertUnlessMatchAny() {
+        val p = FakePrefs()
+        rules(p,
+            AddonRule(id = "inert", priority = 1),
+            AddonRule(id = "spaces", priority = 2, keywordContains = "   "),
+            AddonRule(id = "any", priority = 3, matchAny = true)
+        )
+        assertEquals(listOf("any"), AddonRules.matching(p.ctx, event(body = "anything"), 0L).map { it.id })
+        // matches() stays the pure "are the conditions satisfied" answer, pinned by the S1/S2 suite
+        assertTrue(AddonRules.matches(AddonRule(), event()))
+    }
+
+    @Test
+    fun disabledRuleInTheMiddleIsSkipped() {
+        val p = FakePrefs()
+        rules(p,
+            AddonRule(id = "1", priority = 1, keywordContains = "کد"),
+            AddonRule(id = "2", priority = 2, keywordContains = "کد", enabled = false),
+            AddonRule(id = "3", priority = 3, keywordContains = "کد")
+        )
+        assertEquals(listOf("1", "3"), AddonRules.matching(p.ctx, event(body = "کد 42"), 0L).map { it.id })
+    }
+
+    @Test
+    fun cooldownBlocksSecondFireAndAllowsAfterExpiry() {
+        val p = FakePrefs()
+        val rule = AddonRule(id = "cd", keywordContains = "کد", cooldownSeconds = 60)
+        val t0 = 1_700_000_000_000L
+        assertTrue("first fire", AddonRules.allowedNow(p.ctx, rule, t0))
+        AddonRules.markFired(p.ctx, rule, t0)
+        assertEquals("last fire must land in prefs, not memory", t0, p.values["addon_fired_cd"])
+        assertFalse("inside the window", AddonRules.allowedNow(p.ctx, rule, t0 + 59_999))
+        assertTrue("window elapsed", AddonRules.allowedNow(p.ctx, rule, t0 + 60_000))
+        // 0 = every time, and it must not write state
+        assertTrue(AddonRules.allowedNow(p.ctx, AddonRule(id = "free", cooldownSeconds = 0), t0))
+        assertFalse(p.values.containsKey("addon_fired_free"))
+    }
+
+    @Test
+    fun actionsListKeepsItsOrderThroughSaveAndLoad() {
+        val p = FakePrefs()
+        val rule = AddonRule(id = "m", action = "mark_read", actions = listOf("mark_read", "copy_otp", "alert"))
+        rules(p, rule)
+        val back = AddonRules.load(p.ctx).single()
+        assertEquals(listOf("mark_read", "copy_otp", "alert"), back.actions)
+        assertEquals(rule, back)
+    }
+
+    @Test
+    fun legacySingleActionRuleStillWorks() {
+        val p = FakePrefs()
+        rules(p, AddonRule(id = "l", keywordContains = "کد", action = "copy_body"))
+        val back = AddonRules.load(p.ctx).single()
+        assertEquals(emptyList<String>(), back.actions)
+        assertEquals(listOf("l"), AddonRules.matching(p.ctx, event(body = "کد 42"), 0L).map { it.id })
+    }
+
+    @Test
+    fun executeAllDryRunCoversEveryActionAndIsSafe() {
+        val p = FakePrefs()
+        // dryRun returns before touching the system: even an unknown action name must not throw
+        AddonRules.executeAll(p.ctx, AddonRule(id = "m", actions = listOf("copy_otp", "forward", "email", "no_such_action")),
+            event(body = "کد 42"), dryRun = true)
+        AddonRules.executeAll(p.ctx, AddonRule(action = "copy_body"), event(), dryRun = true)
+    }
 }

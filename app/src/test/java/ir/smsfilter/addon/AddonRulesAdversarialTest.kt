@@ -326,7 +326,7 @@ class AddonRulesAdversarialTest {
     fun secondPassNoConditionRuleStillMatchesEverything() {
         // Documented current behaviour, NOT the S1 bug: a rule with zero conditions matches all,
         // and because the raw-blank gate skips the condition, a spaces-only keyword is zero conditions.
-        // Plan S3 makes zero-condition rules inert; until then this stays true.
+        // S3 keeps this contract for matches(); matching() is what refuses to run such a rule.
         assertTrue(AddonRules.matches(AddonRule(), ev(sender = "", body = "")))
         assertTrue(AddonRules.matches(AddonRule(keywordContains = "   "), ev(body = "anything")))
         assertTrue(AddonRules.matches(AddonRule(senderContains = "   "), ev(sender = "999")))
@@ -543,6 +543,7 @@ class AddonRulesAdversarialTest {
 
     private class FakePrefs {
         val values = mutableMapOf<String, Any?>()
+        val writes = mutableListOf<String>()
         private var editorRef: SharedPreferences.Editor? = null
         val ctx: Context
 
@@ -553,6 +554,7 @@ class AddonRulesAdversarialTest {
             ) { _, m, args ->
                 when (m.name) {
                     "putString", "putBoolean", "putInt", "putLong", "putFloat", "putStringSet" -> {
+                        writes += args[0] as String
                         values[args[0] as String] = args[1]
                         editorRef
                     }
@@ -570,6 +572,8 @@ class AddonRulesAdversarialTest {
                 when (m.name) {
                     "getString" -> values[args[0] as String] as? String
                     "getBoolean" -> values[args[0] as String] as? Boolean ?: (args.getOrNull(1) as? Boolean ?: false)
+                    "getInt" -> values[args[0] as String] as? Int ?: (args.getOrNull(1) as? Int ?: 0)
+                    "getLong" -> values[args[0] as String] as? Long ?: (args.getOrNull(1) as? Long ?: 0L)
                     "contains" -> values.containsKey(args[0] as String)
                     "edit" -> editorRef
                     else -> null
@@ -577,6 +581,8 @@ class AddonRulesAdversarialTest {
             } as SharedPreferences
             ctx = object : android.content.ContextWrapper(null) {
                 override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences = sp
+                // No services here: dispatch()'s execute() hits a null base context and throws,
+                // which executeAll() catches per action. Nothing is faked into success.
             }
         }
     }
@@ -776,5 +782,387 @@ class AddonRulesAdversarialTest {
                 throw AssertionError("pattern '$p' on ${b.length}-char body escaped matches(): ${t.javaClass.name}", t)
             }
         }
+    }
+
+    // ================= S3: every matching rule, multi-action, cooldown, inert empty rules =================
+
+    private fun rules(ctx: Context, vararg r: AddonRule) = AddonRules.save(ctx, r.toList())
+
+    // ---------- S3.1 ordering / enablement ----------
+
+    @Test
+    fun s3EveryMatchingRuleIsReturnedOnceInPriorityOrder() {
+        val p = prefs(null)
+        rules(
+            p.ctx,
+            AddonRule(id = "mid", priority = 5, keywordContains = "کد"),
+            AddonRule(id = "first", priority = 1, keywordContains = "کد"),
+            AddonRule(id = "last", priority = 9, keywordContains = "کد")
+        )
+        assertEquals(listOf("first", "mid", "last"), AddonRules.matching(p.ctx, ev(body = "کد 42"), 0L).map { it.id })
+    }
+
+    @Test
+    fun s3DisabledMiddleRuleIsSkippedAndLaterRuleStillFires() {
+        val p = prefs(null)
+        rules(
+            p.ctx,
+            AddonRule(id = "1", priority = 1, keywordContains = "کد"),
+            AddonRule(id = "2", priority = 2, keywordContains = "کد", enabled = false),
+            AddonRule(id = "3", priority = 3, keywordContains = "کد")
+        )
+        assertEquals(listOf("1", "3"), AddonRules.matching(p.ctx, ev(body = "کد 42"), 0L).map { it.id })
+    }
+
+    @Test
+    fun s3EqualPriorityKeepsSavedOrder() {
+        val p = prefs(null)
+        rules(
+            p.ctx,
+            AddonRule(id = "a", priority = 0, keywordContains = "کد"),
+            AddonRule(id = "b", priority = 0, keywordContains = "کد"),
+            AddonRule(id = "c", priority = 0, keywordContains = "کد")
+        )
+        assertEquals(listOf("a", "b", "c"), AddonRules.matching(p.ctx, ev(body = "کد 42"), 0L).map { it.id })
+    }
+
+    @Test
+    fun s3NonMatchingAndDisabledRulesNeverAppear() {
+        val p = prefs(null)
+        rules(
+            p.ctx,
+            AddonRule(id = "hit", priority = 0, keywordContains = "کد"),
+            AddonRule(id = "miss", priority = 1, keywordContains = "پرداخت"),
+            AddonRule(id = "off", priority = 2, keywordContains = "کد", enabled = false)
+        )
+        assertEquals(listOf("hit"), AddonRules.matching(p.ctx, ev(body = "کد 42"), 0L).map { it.id })
+    }
+
+    // ---------- S3.2 cooldown ----------
+
+    @Test
+    fun s3CooldownBoundaryIsExact() {
+        val p = prefs(null)
+        val r = AddonRule(id = "cd", cooldownSeconds = 60, keywordContains = "کد")
+        val t0 = 1_700_000_000_000L
+        assertTrue("first fire", AddonRules.allowedNow(p.ctx, r, t0))
+        assertTrue("nothing marked yet, pref absent", !p.values.containsKey("addon_fired_cd"))
+        AddonRules.markFired(p.ctx, r, t0)
+        assertEquals("last fire is persisted, not in memory", t0, p.values["addon_fired_cd"])
+        assertFalse("59 999 ms is inside the window", AddonRules.allowedNow(p.ctx, r, t0 + 59_999))
+        assertTrue("60 000 ms is the boundary and must pass", AddonRules.allowedNow(p.ctx, r, t0 + 60_000))
+        assertTrue(AddonRules.allowedNow(p.ctx, r, t0 + 600_000))
+    }
+
+    @Test
+    fun s3WallClockGoingBackwardsKeepsTheRuleBlocked() {
+        val p = prefs(null)
+        val r = AddonRule(id = "cd", cooldownSeconds = 60)
+        val t0 = 1_700_000_000_000L
+        AddonRules.markFired(p.ctx, r, t0)
+        // Documented behaviour: a backwards clock (NTP step, manual change) yields a negative delta,
+        // so the rule stays blocked until the clock reaches last+cooldown again. Safe direction.
+        assertFalse("clock back 1s", AddonRules.allowedNow(p.ctx, r, t0 - 1_000))
+        assertFalse("clock back a full window", AddonRules.allowedNow(p.ctx, r, t0 - 60_000))
+        assertFalse("clock back a year", AddonRules.allowedNow(p.ctx, r, t0 - 31_536_000_000L))
+    }
+
+    @Test
+    fun s3CooldownZeroWritesNoPrefAndRulesUseSeparateKeys() {
+        val p = prefs(null)
+        val free = AddonRule(id = "free", cooldownSeconds = 0)
+        AddonRules.markFired(p.ctx, free, 1_000L)
+        assertFalse("cooldown 0 must not touch prefs", p.values.keys.any { it.startsWith("addon_fired_") })
+        assertTrue(AddonRules.allowedNow(p.ctx, free, 1_000L))
+
+        val a = AddonRule(id = "a", cooldownSeconds = 60)
+        val b = AddonRule(id = "b", cooldownSeconds = 60)
+        AddonRules.markFired(p.ctx, a, 5_000L)
+        assertTrue("b was never fired", AddonRules.allowedNow(p.ctx, b, 5_000L))
+        assertFalse("a is cooling, b must not inherit it", AddonRules.allowedNow(p.ctx, a, 5_000L))
+        AddonRules.markFired(p.ctx, b, 5_000L)
+        assertEquals(5_000L, p.values["addon_fired_a"])
+        assertEquals(5_000L, p.values["addon_fired_b"])
+    }
+
+    @Test
+    fun s3DeletedRuleLeavesAStaleCooldownPref() {
+        val p = prefs(null)
+        val r = AddonRule(id = "gone", cooldownSeconds = 3600, keywordContains = "کد")
+        rules(p.ctx, r)
+        AddonRules.markFired(p.ctx, r, 10_000L)
+        rules(p.ctx) // delete every rule: save() never prunes addon_fired_* keys
+        assertTrue("rule is gone", AddonRules.matching(p.ctx, ev(body = "کد 42"), 0L).isEmpty())
+        assertEquals("stale pref survives deletion (non-blocking)", 10_000L, p.values["addon_fired_gone"])
+        // and a re-created rule that reuses the id starts out cooling
+        rules(p.ctx, r)
+        assertFalse("same id inherits the old window", AddonRules.allowedNow(p.ctx, r, 20_000L))
+    }
+
+    // ---------- S3.3 cooling rule must not fall through to the legacy actions path ----------
+
+    private class SentinelAction : SmsAction {
+        override val id = "test_sentinel"
+        var calls = 0
+        override fun enabled(ctx: Context) = true
+        override fun onSmsReceived(ctx: Context, event: SmsEvent) { calls++ }
+    }
+
+    private fun withSentinel(block: (SentinelAction) -> Unit) {
+        val s = SentinelAction()
+        AddonBus.register(s)
+        try { block(s) } finally { AddonBus.unregister(s.id) }
+    }
+
+    @Test
+    fun s3CoolingRuleDoesNotFallThroughToLegacyActions() {
+        withSentinel { sentinel ->
+            val p = prefs(null)
+            val r = AddonRule(id = "cool", cooldownSeconds = 60, keywordContains = "کد", action = "copy_otp")
+            rules(p.ctx, r)
+            AddonRules.markFired(p.ctx, r, System.currentTimeMillis())
+            val before = p.values["addon_fired_cool"]
+            AddonBus.dispatch(p.ctx, ev(body = "کد 42", otp = "1234"))
+            assertEquals("legacy path must NOT run for a matched-but-cooling rule", 0, sentinel.calls)
+            assertEquals("cooling rule did not re-fire", before, p.values["addon_fired_cool"])
+        }
+    }
+
+    @Test
+    fun s3NoRuleMatchedRunsLegacyPathExactlyOnce() {
+        withSentinel { sentinel ->
+            val p = prefs(null)
+            rules(p.ctx, AddonRule(id = "other", keywordContains = "پرداخت"))
+            AddonBus.dispatch(p.ctx, ev(body = "کد 42"))
+            assertEquals("unchanged legacy behaviour", 1, sentinel.calls)
+        }
+    }
+
+    @Test
+    fun s3FiringRuleAlsoSkipsLegacyPath() {
+        withSentinel { sentinel ->
+            val p = prefs(null)
+            rules(p.ctx, AddonRule(id = "hit", keywordContains = "کد", action = "copy_otp"))
+            AddonBus.dispatch(p.ctx, ev(body = "کد 42", otp = "1234"))
+            assertEquals("a claimed SMS must not also run the legacy actions", 0, sentinel.calls)
+        }
+    }
+
+    @Test
+    fun s3InertConditionlessRuleDoesNotClaimTheSmsSoLegacyStillRuns() {
+        withSentinel { sentinel ->
+            val p = prefs(null)
+            rules(p.ctx, AddonRule(id = "inert", action = "copy_otp"))
+            AddonBus.dispatch(p.ctx, ev(body = "کد 42", otp = "1234"))
+            assertEquals("no rule matched -> legacy path", 1, sentinel.calls)
+        }
+    }
+
+    // ---------- S3.4 inertness of condition-less rules ----------
+
+    @Test
+    fun s3ZeroConditionRuleMatchesButNeverFires() {
+        val p = prefs(null)
+        rules(p.ctx, AddonRule(id = "empty"))
+        val e = ev(sender = "", body = "")
+        assertTrue("matches() keeps its documented 'no condition = true' contract", AddonRules.matches(AddonRule(id = "empty"), e))
+        assertTrue("but matching() refuses to hand it to the executor", AddonRules.matching(p.ctx, e, 0L).isEmpty())
+    }
+
+    @Test
+    fun s3MatchAnyRestoresAZeroConditionRule() {
+        val p = prefs(null)
+        rules(p.ctx, AddonRule(id = "any", matchAny = true), AddonRule(id = "empty"))
+        assertEquals(listOf("any"), AddonRules.matching(p.ctx, ev(body = "anything"), 0L).map { it.id })
+        assertTrue(AddonRules.matches(AddonRule(matchAny = true), ev(body = "anything")))
+    }
+
+    @Test
+    fun s3SpacesOnlyConditionsCountAsNoCondition() {
+        val p = prefs(null)
+        rules(
+            p.ctx,
+            AddonRule(id = "blankKw", keywordContains = "   "),
+            AddonRule(id = "blankSender", senderContains = "   "),
+            AddonRule(id = "blankList", keywords = listOf("   "))
+        )
+        // A list term is an unsatisfiable condition, not "no condition", so it is inert either way.
+        assertTrue(AddonRules.matching(p.ctx, ev(sender = "123", body = "anything"), 0L).isEmpty())
+        assertTrue("matches() still says true for the legacy blanks", AddonRules.matches(AddonRule(keywordContains = "   "), ev(body = "x")))
+    }
+
+    @Test
+    fun s3ExistingConditionlessRuleFromAnOldInstallIsSilentlyDead() {
+        // The pre-S3 "New rule" default: name + copy_otp, no conditions at all.
+        val p = prefs("""[{"id":"old","name":"New rule","action":"copy_otp","priority":0}]""")
+        val loaded = AddonRules.load(p.ctx).single()
+        assertTrue("rule loads without error", loaded.enabled && loaded.actions.isEmpty())
+        assertTrue("matches() would say yes", AddonRules.matches(loaded, ev(body = "code 42", otp = "42")))
+        assertTrue("matching() excludes it, so it never fires", AddonRules.matching(p.ctx, ev(body = "code 42", otp = "42"), 0L).isEmpty())
+        // no migration exists: save() writes matchAny=false, the rule stays dead after any UI edit
+        AddonRules.save(p.ctx, listOf(loaded))
+        assertTrue(AddonRules.matching(p.ctx, ev(body = "code 42", otp = "42"), 0L).isEmpty())
+    }
+
+    @Test
+    fun s3DefaultsCreatedFromLegacyTogglesAreNotConditionless() {
+        // ensureDefaults() must not create rules that S3 will refuse to run.
+        val p = prefs(null)
+        p.values["addon_otp_autocopy"] = true
+        p.values["addon_copy_body"] = true
+        p.values["addon_autoreply"] = true
+        AddonRules.ensureDefaults(p.ctx)
+        val defaults = AddonRules.load(p.ctx)
+        assertEquals(3, defaults.size)
+        for (r in defaults) {
+            assertTrue("default rule '${r.name}' has a condition", AddonRules.matching(p.ctx, ev(body = "code 42", otp = "42", fromContact = true), 0L).any { it.id == r.id })
+        }
+    }
+
+    // ---------- S3.5 multi-action ----------
+
+    @Test
+    fun s3ActionsCooldownAndMatchAnySurviveSaveLoad() {
+        val p = prefs(null)
+        val r = AddonRule(
+            id = "multi", name = "multi", keywordContains = "کد", keywords = listOf("کد"),
+            action = "mark_read", actions = listOf("mark_read", "copy_otp", "alert"),
+            cooldownSeconds = 90, matchAny = false
+        )
+        AddonRules.save(p.ctx, listOf(r))
+        val back = AddonRules.load(p.ctx).single()
+        assertEquals(listOf("mark_read", "copy_otp", "alert"), back.actions)
+        assertEquals("order is part of the contract", "mark_read", back.actions.first())
+        assertEquals(90, back.cooldownSeconds)
+        assertFalse(back.matchAny)
+        assertEquals(r, back)
+    }
+
+    @Test
+    fun s3LegacySingleActionRuleStillFiresOnce() {
+        val p = prefs(null)
+        rules(p.ctx, AddonRule(id = "l", keywordContains = "کد", action = "copy_otp"))
+        val hit = AddonRules.matching(p.ctx, ev(body = "کد 42"), 0L)
+        assertEquals(1, hit.size)
+        assertEquals("legacy row has no actions list", emptyList<String>(), hit.single().actions)
+        // executeAll falls back to the single `action`; nothing else can double it
+        AddonRules.executeAll(p.ctx, hit.single(), ev(body = "کد 42", otp = "1234"), dryRun = true)
+    }
+
+    @Test
+    fun s3UnknownActionDoesNotStopTheRestOfTheRule() {
+        val p = prefs(null)
+        val r = AddonRule(id = "x", keywordContains = "کد", actions = listOf("copy_otp", "no_such_action", "copy_body"))
+        rules(p.ctx, r)
+        val hit = AddonRules.matching(p.ctx, ev(body = "کد 42"), 0L).single()
+        try {
+            AddonRules.executeAll(p.ctx, hit, ev(body = "کد 42", otp = "1234"), dryRun = true)
+        } catch (t: Throwable) {
+            throw AssertionError("unknown action escaped executeAll: ${t.javaClass.name}", t)
+        }
+        // code-read: the loop is per-action try/catch, so the third action still runs after the second throws.
+        assertEquals(3, hit.actions.size)
+        assertEquals("copy_body", hit.actions.last())
+    }
+
+    @Test
+    fun s3EmptyActionsListFallsBackToPrimaryAction() {
+        val p = prefs(null)
+        rules(p.ctx, AddonRule(id = "e", keywordContains = "کد", action = "copy_otp", actions = emptyList()))
+        val hit = AddonRules.matching(p.ctx, ev(body = "کد 42"), 0L).single()
+        assertEquals(emptyList<String>(), hit.actions)
+        // executeAll on a dry run with an empty list must not throw and must cover `action`
+        AddonRules.executeAll(p.ctx, hit, ev(body = "کد 42", otp = "1"), dryRun = true)
+    }
+
+    // ---------- S3.6 cost of 20 regex rules ----------
+
+    @Test
+    fun s3TwentyRegexRulesOnA200CharBodyStayUnder100ms() {
+        val p = prefs(null)
+        val patterns = listOf(
+            """code\d{4}""", """ref\d{5}""", """order\d{2}""", """\d{2}:\d{2}""", """^09\d{9}$""",
+            """invoice\d{6}""", """card\d{4}""", """otp\d{3}""", """bank\w+""", """payment\w{2}""",
+            """discount\w{3}""", """verify\d{4}""", """token\w{4}""", """login\w{2}""", """\w+@\w+""",
+            """https?://\S+""", """\d{4}-\d{2}""", """کد\w{2}""", """تخفیف\w{2}""", """سفارش\w{2}"""
+        )
+        assertEquals(20, patterns.size)
+        val list = patterns.mapIndexed { i, pat ->
+            AddonRule(id = "r$i", priority = i, keywords = listOf(pat), keywordContains = pat, keywordRegex = true)
+        }
+        AddonRules.save(p.ctx, list)
+        for (pat in patterns) assertTrue("pattern '$pat' must be usable", AddonRules.regexUsable(pat))
+
+        val body = ("your order code 1234 ref 56789 at 12:34 card 4321 invoice 123456 bank melli " +
+            "payment discount verify token login 09123456789 https://x.y/z کد 42 تخفیف ویژه سفارش شما ثبت شد ").padEnd(200, ' ')
+        assertEquals(200, body.length)
+        val e = ev(body = body)
+
+        repeat(50) { AddonRules.matching(p.ctx, e, 0L) }   // warm JIT + classloading
+        val runs = 100
+        val t0 = System.nanoTime()
+        var matched = 0
+        repeat(runs) { matched = AddonRules.matching(p.ctx, e, 0L).size }
+        val avgMs = (System.nanoTime() - t0) / runs / 1_000_000.0
+        println("S3 cost: 20 regex rules on ${body.length}-char body -> ${"%.3f".format(avgMs)}ms per matching() call ($matched rules matched)")
+
+        // budget: one SMS receive path, includes the JSON load() that dispatch pays on every SMS
+        assertTrue("S3 FAIL: 20 regex rules cost ${"%.2f".format(avgMs)}ms, budget 100ms", avgMs < 100.0)
+
+        // Residual risk probe (not a pass gate): the quantifier cap still admits 2-quantifier patterns
+        // that are slow on a homogeneous body. 20 of those blow the same budget, so record the number.
+        val worst = ("a".repeat(200))
+        val worstRules = (0 until 20).map { i -> AddonRule(id = "w$i", priority = i, keywords = listOf("a*a*b"), keywordContains = "a*a*b", keywordRegex = true) }
+        val w = prefs(null)
+        AddonRules.save(w.ctx, worstRules)
+        repeat(5) { AddonRules.matching(w.ctx, ev(body = worst), 0L) }
+        val w0 = System.nanoTime()
+        repeat(3) { AddonRules.matching(w.ctx, ev(body = worst), 0L) }
+        println("S3 worst-case regression probe: 20x 'a*a*b' on 200 'a's -> ${"%.1f".format((System.nanoTime() - w0) / 3 / 1_000_000.0)}ms")
+    }
+
+
+    // ---------- S3.7 execution evidence (TEST team) ----------
+    // The action bodies cannot run on the JVM: ThreadFlags/Sms read Uri/CONTENT_URI statics whose
+    // stub <clinit> throws, and every service lookup is null. What is observable is markFired():
+    // AddonBus.dispatch calls it once per executed rule in the same loop body, so the order and
+    // count of addon_fired_* writes is the order and count of rule executions.
+
+    private fun evT(body: String, threadId: Long = 7) = SmsEvent("123", body, 0L, 0, threadId, false, false, null, 0)
+
+    private fun firedWrites(p: FakePrefs) = p.writes.filter { it.startsWith("addon_fired_") }
+
+    @Test
+    fun s3DispatchExecutesEveryMatchingRuleExactlyOnceInPriorityOrder() {
+        val p = prefs(null)
+        rules(
+            p.ctx,
+            AddonRule(id = "C", priority = 30, keywordContains = "کد", cooldownSeconds = 60),
+            AddonRule(id = "A", priority = 10, keywordContains = "کد", cooldownSeconds = 60),
+            AddonRule(id = "off", priority = 5, keywordContains = "کد", cooldownSeconds = 60, enabled = false),
+            AddonRule(id = "miss", priority = 15, keywordContains = "پرداخت", cooldownSeconds = 60),
+            AddonRule(id = "B", priority = 20, keywordContains = "کد", cooldownSeconds = 60)
+        )
+        assertEquals(listOf("A", "B", "C"), AddonRules.matching(p.ctx, evT("کد 42"), 0L).map { it.id })
+        p.writes.clear()
+        AddonBus.dispatch(p.ctx, evT("کد 42"))
+        assertEquals(
+            "each matched rule must run once, in priority order",
+            listOf("addon_fired_A", "addon_fired_B", "addon_fired_C"),
+            firedWrites(p)
+        )
+    }
+
+    @Test
+    fun s3CoolingRuleIsSkippedButLaterRulesStillRun() {
+        val p = prefs(null)
+        val hot = AddonRule(id = "hot", priority = 1, keywordContains = "کد", cooldownSeconds = 3600)
+        rules(p.ctx, hot, AddonRule(id = "later", priority = 2, keywordContains = "کد", cooldownSeconds = 60))
+        val stamped = System.currentTimeMillis()
+        AddonRules.markFired(p.ctx, hot, stamped)
+        p.writes.clear()
+        AddonBus.dispatch(p.ctx, evT("کد 42"))
+        assertEquals("cooling rule must not execute, the next one must", listOf("addon_fired_later"), firedWrites(p))
+        assertEquals("cooling rule keeps its original timestamp", stamped, p.values["addon_fired_hot"])
     }
 }
