@@ -2,8 +2,8 @@
 
 **Verdict: PASS** (independent test pass, no DEV code edited)
 
-- Suite: `:app:testDebugUnitTest` → **162 tests, 0 failures** (fresh compile+run, 1m09s; adversarial class 85 tests, 0 failures).
-- S3 coverage: 31 tests (24 in `AddonRulesAdversarialTest`, 7 in `AddonRulesTest`).
+- Suite: `:app:testDebugUnitTest` → **162 tests, 0 failures** on the final tree (multiple full `--rerun-tasks` runs; adversarial class 85 tests, 0 failures).
+- S3 coverage: 31 tests (24 in `AddonRulesAdversarialTest`, 7 in `AddonRulesTest`); full suite 162 tests.
 - All checks go through the public API (`AddonRules.matching/matches/allowedNow/markFired/executeAll/save/load`, `AddonBus.dispatch`), explicit `nowMillis` where the signature takes one (`dispatch` always uses the wall clock, so its cooldown path is driven by pre-marking the pref), no sleeps, no threads.
 - Build: `JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 ANDROID_HOME=$HOME/Android/Sdk $HOME/tools/gradle/gradle-8.9/bin/gradle --no-daemon :app:testDebugUnitTest`
 
@@ -31,7 +31,7 @@
 | 4b | unknown action name does not stop the rest | PASS (no-throw) | `s3UnknownActionDoesNotStopTheRestOfTheRule` (dryRun, 3 actions incl. `no_such_action`), per-action try/catch in `executeAll` |
 | 4c | legacy single `action` rule still fires once | PASS | `s3LegacySingleActionRuleStillFiresOnce`, `s3EmptyActionsListFallsBackToPrimaryAction` |
 | 4d | save/load keeps actions + cooldown + matchAny | PASS | `s3ActionsCooldownAndMatchAnySurviveSaveLoad` (full data-class equality) |
-| 5 | 20 regex rules × 200-char body cost | PASS — **3.4–5.1 ms** per `matching()` call across 3 runs (budget 100 ms, ~20× margin) | `s3TwentyRegexRulesOnA200CharBodyStayUnder100ms` (50 warmup + 100 measured calls, includes the JSON `load()` that dispatch pays per SMS) |
+| 5 | 20 regex rules × 200-char body cost | PASS — **3.4–5.4 ms** per `matching()` call across 4 runs (budget 100 ms, ~20× margin) | `s3TwentyRegexRulesOnA200CharBodyStayUnder100ms` (50 warmup + 100 measured calls, includes the JSON `load()` that dispatch pays per SMS) |
 | 6a | outer Save cannot persist an unusable regex | CODE-READ PASS / UNVERIFIED-BY-TEST | `MainActivity.kt:1068` `badRegex`, `:1152` `TextButton(enabled = badRegex.isEmpty())` |
 | 6b | chips cannot reach an empty action list | CODE-READ PASS / UNVERIFIED-BY-TEST | `:1119` `if (actions.size > 1) actions - a else actions`; init `rule.actions.ifEmpty { listOf(rule.action) }`; Save uses `actions.first()` |
 | 6c | cooldown parses safely on empty/invalid input | CODE-READ PASS / UNVERIFIED-BY-TEST | `:1140` digits-only filter, `:1172` `toIntOrNull()?.coerceAtLeast(0) ?: 0` |
@@ -53,8 +53,8 @@ After S3 the same rule is inert: `matching()` skips it, so it fires nothing and 
 
 Measured on the JVM test runner (`System.nanoTime`, 50 warmup calls then 100 measured, includes the `load()` JSON parse that `dispatch` pays on every SMS):
 
-- 20 regex rules × 200-char body (realistic patterns: `code\d{4}`, `\d{2}:\d{2}`, `^09\d{9}$`, Persian `کد\w{2}`…): **3.415 / 4.871 / 5.143 ms** across three runs → PASS, budget 100 ms.
-- Adversarial probe (not a pass gate, printed by the same test): 20 rules whose pattern is `a*a*b` against a 200-char body of `"a"` → **818 ms**. This is the real ceiling of the current cap: `regexUsable` allows exactly two quantifiers, and a 2-quantifier pattern costs **39–58 ms per rule** on a homogeneous 200-char body (S2c log). The 100 ms budget therefore holds for ordinary SMS text, not for that shape — see residual risk 7.
+- 20 regex rules × 200-char body (realistic patterns: `code\d{4}`, `\d{2}:\d{2}`, `^09\d{9}$`, Persian `کد\w{2}`…): **3.415 / 4.871 / 5.143 / 5.395 ms** across four runs (JVM/JIT noise, not a trend) → PASS, budget 100 ms.
+- Adversarial probe (not a pass gate, printed by the same test): 20 rules whose pattern is `a*a*b` against a 200-char body of `"a"` → **777–818 ms** across runs. This is the real ceiling of the current cap: `regexUsable` allows exactly two quantifiers, and a 2-quantifier pattern costs **33–40 ms per rule** on a homogeneous 200-char body (S2c log). The 100 ms budget therefore holds for ordinary SMS text, not for that shape — see residual risk 7.
 - Whole adversarial class: ~14 s wall (dominated by the 200 000-char bodies and the S2 ReDoS probes).
 
 ## Changes made to the fixture (test-only)
@@ -70,7 +70,7 @@ Measured on the JVM test runner (`System.nanoTime`, 50 warmup calls then 100 mea
 ## UNVERIFIED (no device / no emulator, no Robolectric)
 
 - **All editor UI behaviour** (`AddonRuleEditor`): "Save disabled on bad regex", chip min-1-action, cooldown field, `Any SMS` chip. Verified by reading `MainActivity.kt` only; Compose is not exercised by any test.
-- **Real action side effects**: clipboard write, toast, SMS send/forward, notification dismiss/alert, email chooser/app intent, `ThreadFlags` mute/pin/archive. These cannot run on the JVM — touching `ThreadFlags` raises `ExceptionInInitializerError` (its `<clinit>` parses a `content://` `Uri`, and framework statics in the unit-test android.jar return null through Kotlin's non-null check), and every `getSystemService` lookup returns null. Attempted and abandoned; not faked into success. The "one event per rule / priority order" evidence is therefore the `addon_fired_*` write order, not two real side effects.
+- **Real action side effects**: clipboard write, toast, SMS send/forward, notification dismiss/alert, email chooser/app intent, `ThreadFlags` mute/pin/archive. These cannot run on the JVM — touching `ThreadFlags` raises `ExceptionInInitializerError`: its `<clinit>` builds a `content://` `Uri` and `Uri.parse` throws `RuntimeException("Stub!")` in the unit-test android.jar (reproduced with a throwaway probe, then removed). `getSystemService` returns null, and `Telephony.Sms.CONTENT_URI` fails the same way, so the `forward`/`mark_read` paths are equally unreachable. Attempted and abandoned; not faked into success. The "one event per rule / priority order" evidence is therefore the `addon_fired_*` write order, not two real side effects.
 - **Per-action execution order on a real run**: `dryRun` returns before `execute()`, so the order is proven structurally (loop + `rule.copy(action = a)`) and by list round-trip, not by observing two side effects in sequence.
 - **Cooldown across a process restart** — asserted only at the prefs level (value read from `SharedPreferences`, not memory), no device restart.
 
@@ -82,5 +82,5 @@ Measured on the JVM test runner (`System.nanoTime`, 50 warmup calls then 100 mea
 4. Editor cooldown field has no upper bound; an 11-digit entry overflows `toIntOrNull()` → `0` → cooldown silently becomes "every time". UI-only, unverified, low impact.
 5. Multi-action `dryRun` and the `email` branch share `actionParam`/`emailTo`: a rule with `["forward","email"]` uses the same `actionParam` as the forward number *and* the email fallback recipient. Not part of the S3 attack list; flagged for review.
 6. Regex cost measured on a desktop JVM; an ART device can be 2–5× slower. Realistic 20-rule set ≈ 5 ms × 5 ≈ 25 ms, still inside the 100 ms budget, but the headroom is smaller on low-end hardware.
-7. The 100 ms budget is **not** shape-proof: `regexUsable` admits two unbounded quantifiers, and 20 × `a*a*b` on a 200-char homogeneous body measured **818 ms** (`s3TwentyRegexRulesOnA200CharBodyStayUnder100ms` probe). Real SMS text keeps the real path at ~5 ms, so this needs 20 hostile patterns to hurt, but the per-SMS budget is only enforced by pattern shape, not by a total-time cap. Fix direction if it matters: run `matching()` off the receive thread, or lower `MAX_QUANTIFIERS` to 1 / measure per-pattern width.
+7. The 100 ms budget is **not** shape-proof: `regexUsable` admits two unbounded quantifiers, and 20 × `a*a*b` on a 200-char homogeneous body measured **777–818 ms** (`s3TwentyRegexRulesOnA200CharBodyStayUnder100ms` probe). Real SMS text keeps the real path at ~5 ms, so this needs 20 hostile patterns to hurt, but the per-SMS budget is only enforced by pattern shape, not by a total-time cap. Fix direction if it matters: run `matching()` off the receive thread, or lower `MAX_QUANTIFIERS` to 1 / measure per-pattern width.
 8. A rule with zero conditions saved by an old install is silent: no migration, no toast. The list row does say `no conditions — never fires` and offers `Any SMS`, so the warning exists but only if the user opens Features.
