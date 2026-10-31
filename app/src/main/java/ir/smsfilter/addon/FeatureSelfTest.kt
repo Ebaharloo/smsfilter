@@ -44,8 +44,7 @@ object FeatureSelfTest {
         check("min length false", !AddonRules.matches(AddonRule(minLength = 5), ev(body = "12"), now))
         check("max length true", AddonRules.matches(AddonRule(maxLength = 5), ev(body = "12345"), now))
         check("max length false", !AddonRules.matches(AddonRule(maxLength = 5), ev(body = "123456"), now))
-        check("match all", AddonRules.matches(AddonRule(senderContains = "123", onlyFromContacts = true, matchAll = true), ev(sender = "123", fromContact = true), now))
-        check("match any", AddonRules.matches(AddonRule(senderContains = "123", onlyFromContacts = true, matchAll = false), ev(sender = "123", fromContact = false), now))
+        check("match all", AddonRules.matches(AddonRule(senderContains = "123", onlyFromContacts = true), ev(sender = "123", fromContact = true), now))
 
         // Action dry-run (no side effects)
         val e = ev(sender = "123", body = "code 42", fromContact = true, otp = "42")

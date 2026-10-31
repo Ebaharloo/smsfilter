@@ -25,18 +25,10 @@ class AddonRulesTest {
 
     @Test
     fun keywordAndSenderAllMustMatch() {
-        val rule = AddonRule(senderContains = "123", keywordContains = "otp", matchAll = true)
+        val rule = AddonRule(senderContains = "123", keywordContains = "otp")
         assertTrue(AddonRules.matches(rule, event(body = "your otp is 42")))
         assertFalse(AddonRules.matches(rule, event(sender = "999", body = "your otp is 42")))
         assertFalse(AddonRules.matches(rule, event(body = "hello")))
-    }
-
-    @Test
-    fun anyModeMatchesOne() {
-        val rule = AddonRule(senderContains = "123", keywordContains = "otp", matchAll = false)
-        assertTrue(AddonRules.matches(rule, event(sender = "123", body = "hello")))
-        assertTrue(AddonRules.matches(rule, event(sender = "999", body = "your otp")))
-        assertFalse(AddonRules.matches(rule, event(sender = "999", body = "hello")))
     }
 
     @Test
@@ -83,7 +75,7 @@ class AddonRulesTest {
 
     @Test
     fun matchAllRequiresEveryActiveCondition() {
-        val rule = AddonRule(senderContains = "123", onlyFromContacts = true, matchAll = true)
+        val rule = AddonRule(senderContains = "123", onlyFromContacts = true)
         assertTrue(AddonRules.matches(rule, event(sender = "123", fromContact = true)))
         assertFalse(AddonRules.matches(rule, event(sender = "123", fromContact = false)))
         assertFalse(AddonRules.matches(rule, event(sender = "999", fromContact = true)))
@@ -123,17 +115,69 @@ class AddonRulesTest {
 
     @Test
     fun timeAndContentCombined() {
-        val rule = AddonRule(keywordContains = "otp", startHour = 9, endHour = 17, matchAll = true)
+        val rule = AddonRule(keywordContains = "otp", startHour = 9, endHour = 17)
         assertTrue(AddonRules.matches(rule, event(body = "otp code"), ts(java.util.Calendar.MONDAY, 12)))
         assertFalse(AddonRules.matches(rule, event(body = "otp code"), ts(java.util.Calendar.MONDAY, 20)))
         assertFalse(AddonRules.matches(rule, event(body = "hello"), ts(java.util.Calendar.MONDAY, 12)))
     }
 
+    // --- Persian normalization (ZWNJ) ---
+
     @Test
-    fun matchAnyAcceptsOneActiveCondition() {
-        val rule = AddonRule(senderContains = "123", onlyFromContacts = true, matchAll = false)
-        assertTrue(AddonRules.matches(rule, event(sender = "123", fromContact = false)))
-        assertTrue(AddonRules.matches(rule, event(sender = "999", fromContact = true)))
-        assertFalse(AddonRules.matches(rule, event(sender = "999", fromContact = false)))
+    fun zwnjKeywordMatchesPlainBody() {
+        val rule = AddonRule(keywordContains = "نیم\u200Cفاصله")
+        assertTrue(AddonRules.matches(rule, event(body = "این پیام نیم فاصله دارد")))
+        assertTrue(AddonRules.matches(rule, event(body = "نیم\u200Cفاصله")))
+        // squash() also bridges fully-closed forms
+        assertTrue(AddonRules.matches(rule, event(body = "نیمفاصله")))
     }
+
+    @Test
+    fun arabicYehAndKafMatchPersian() {
+        assertTrue(
+            AddonRules.matches(
+                AddonRule(keywordContains = "تخفیف".replace('ی', 'ي')),
+                event(body = "تخفیف ویژه")
+            )
+        )
+        assertTrue(
+            AddonRules.matches(
+                AddonRule(keywordContains = "کد".replace('ک', 'ك')),
+                event(body = "کد 42")
+            )
+        )
+        assertTrue(
+            AddonRules.matches(
+                AddonRule(senderContains = "کد".replace('ک', 'ك')),
+                event(sender = "کدبانو")
+            )
+        )
+    }
+
+    @Test
+    fun persianDigitsMatchAscii() {
+        assertTrue(AddonRules.matches(AddonRule(senderContains = "۱۲۳"), event(sender = "x123y")))
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = "کد ۴۲"), event(body = "کد 42 شما")))
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = "۴۲"), event(body = "code 42")))
+        assertFalse(AddonRules.matches(AddonRule(keywordContains = "۴۲"), event(body = "code 43")))
+    }
+
+    @Test
+    fun latinKeywordCaseFoldedAfterNormalize() {
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = "OtP"), event(body = "your OTP code")))
+        assertFalse(AddonRules.matches(AddonRule(keywordContains = "OtP"), event(body = "your code")))
+    }
+
+    @Test
+    fun blankKeywordStillMatchesAnything() {
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = "   "), event(body = "anything")))
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = ""), event(body = "")))
+    }
+
+    @Test
+    fun spacedOutAndPhraseKeywordsMatch() {
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = "کد   تخفیف"), event(body = "کد تخفیف ویژه")))
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = "تخفیف"), event(body = "ت خ ف ی ف")))
+    }
+
 }

@@ -10,6 +10,7 @@ import android.util.Log
 import android.widget.Toast
 import ir.smsfilter.FilterService
 import ir.smsfilter.Learned
+import ir.smsfilter.Normalizer
 import ir.smsfilter.Sms
 import ir.smsfilter.ThreadFlags
 import org.json.JSONArray
@@ -21,7 +22,6 @@ data class AddonRule(
     val name: String = "",
     val enabled: Boolean = true,
     val priority: Int = 0,
-    val matchAll: Boolean = true,
     val senderContains: String = "",
     val keywordContains: String = "",
     val minLength: Int = 0,
@@ -57,7 +57,6 @@ object AddonRules {
                     name = o.optString("name", ""),
                     enabled = o.optBoolean("enabled", true),
                     priority = o.optInt("priority", i),
-                    matchAll = o.optBoolean("matchAll", true),
                     senderContains = o.optString("senderContains", ""),
                     keywordContains = o.optString("keywordContains", ""),
                     minLength = o.optInt("minLength", 0),
@@ -92,7 +91,6 @@ object AddonRules {
             o.put("name", r.name)
             o.put("enabled", r.enabled)
             o.put("priority", r.priority)
-            o.put("matchAll", r.matchAll)
             o.put("senderContains", r.senderContains)
             o.put("keywordContains", r.keywordContains)
             o.put("minLength", r.minLength)
@@ -143,10 +141,17 @@ object AddonRules {
         val cal = java.util.Calendar.getInstance().apply { timeInMillis = nowMillis }
         val active = mutableListOf<Boolean>()
         if (rule.senderContains.isNotBlank()) {
-            active += event.sender.contains(rule.senderContains, ignoreCase = true)
+            // A term that normalizes to "" would make contains("") match every SMS: unusable, never true.
+            val sender = Normalizer.normalize(rule.senderContains)
+            active += sender.isNotEmpty() && Normalizer.normalize(event.sender).contains(sender)
         }
         if (rule.keywordContains.isNotBlank()) {
-            active += event.body.contains(rule.keywordContains, ignoreCase = true)
+            // normalize() folds Arabic/Persian letter variants, digits and case; squash() also
+            // bridges ZWNJ and spaced-out evasion ("ت خ ف ی ف"). Empty kw would match everything.
+            val body = Normalizer.normalize(event.body)
+            val kw = Normalizer.normalize(rule.keywordContains)
+            active += kw.isNotEmpty() &&
+                (body.contains(kw) || Normalizer.squash(body).contains(Normalizer.squash(kw)))
         }
         if (rule.minLength > 0) active += event.body.length >= rule.minLength
         if (rule.maxLength > 0) active += event.body.length <= rule.maxLength
@@ -171,7 +176,8 @@ object AddonRules {
         if (rule.otpRequired == false) active += event.otp == null
 
         if (active.isEmpty()) return true
-        return if (rule.matchAll) active.all { it } else active.any { it }
+        // BuzzKill semantics: every specified condition must hold.
+        return active.all { it }
     }
 
     fun firstMatch(ctx: Context, event: SmsEvent): AddonRule? {
