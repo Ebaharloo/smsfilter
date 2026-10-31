@@ -82,6 +82,7 @@ import ir.smsfilter.core.InboxPolicy
 import ir.smsfilter.addon.AddonRule
 import ir.smsfilter.addon.AddonRules
 import ir.smsfilter.addon.FeatureSelfTest
+import ir.smsfilter.addon.SmsEvent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -940,6 +941,9 @@ fun FeaturesPage() {
     var rules by remember { mutableStateOf(AddonRules.load(ctx)) }
     var editing by remember { mutableStateOf<AddonRule?>(null) }
     var showEditor by remember { mutableStateOf(false) }
+    var testing by remember { mutableStateOf<AddonRule?>(null) }
+    var showDecisions by remember { mutableStateOf(false) }
+    var decisions by remember { mutableStateOf(emptyList<String>()) }
     fun persist() { AddonRules.save(ctx, rules) }
 
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -957,6 +961,26 @@ fun FeaturesPage() {
             }) { Text("Self-test") }
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            item {
+                // Collapsed by default: the rules stay the page's subject.
+                Column {
+                    TextButton(onClick = {
+                        showDecisions = !showDecisions
+                        if (showDecisions) decisions = AddonRules.recentDecisions(ctx)
+                    }) { Text(if (showDecisions) "▾ Recent decisions" else "▸ Recent decisions") }
+                    if (showDecisions) {
+                        if (decisions.isEmpty()) {
+                            Text("No decisions yet.", style = MaterialTheme.typography.bodySmall)
+                        } else {
+                            decisions.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                            TextButton(onClick = {
+                                AddonRules.clearDecisions(ctx)
+                                decisions = emptyList()
+                            }) { Text("Clear") }
+                        }
+                    }
+                }
+            }
             items(rules.sortedBy { it.priority }, key = { it.id }) { rule ->
                 Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.medium) {
                     Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -971,6 +995,7 @@ fun FeaturesPage() {
                         Text("THEN  " + actionSummary(rule), style = MaterialTheme.typography.bodySmall)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             TextButton(onClick = { editing = rule; showEditor = true }) { Text("Edit") }
+                            TextButton(onClick = { testing = rule }) { Text("Test") }
                             TextButton(onClick = {
                                 rules = rules.filterNot { it.id == rule.id }.toMutableList()
                                 persist()
@@ -992,6 +1017,28 @@ fun FeaturesPage() {
                 showEditor = false
             },
             onCancel = { showEditor = false })
+    }
+
+    // Dry-run: same matching code as the receive path, no actions, nothing written.
+    testing?.let { rule ->
+        var body by remember(rule.id) { mutableStateOf("") }
+        val reason = AddonRules.missReason(
+            rule, SmsEvent("", body, 0L, 0, 0L, false, false, null, 0)
+        )
+        AlertDialog(
+            onDismissRequest = { testing = null },
+            title = { Text("Test: ${rule.name.ifBlank { rule.action }}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = body, onValueChange = { body = it },
+                        label = { Text("Message body") }, modifier = Modifier.fillMaxWidth())
+                    Text(
+                        if (reason == null) "MATCH — the actions would run"
+                        else "NO MATCH — ${reason} failed"
+                    )
+                }
+            },
+            confirmButton = { TextButton(onClick = { testing = null }) { Text("Close") } })
     }
 }
 
@@ -1138,7 +1185,7 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                         modifier = Modifier.fillMaxWidth())
                 }
                 OutlinedTextField(value = cooldown, onValueChange = { cooldown = it.filter { c -> c.isDigit() } },
-                    label = { Text("Cooldown seconds (0 = every time)") }, modifier = Modifier.fillMaxWidth())
+                    label = { Text("Cooldown seconds (0 = every time, max ${AddonRules.MAX_COOLDOWN})") }, modifier = Modifier.fillMaxWidth())
                 if (badRegex.isNotEmpty()) {
                     Text("regex unusable, will never match: ${badRegex.joinToString(" | ")}",
                         color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -1169,7 +1216,7 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                     action = actions.first(),
                     actions = actions,
                     actionParam = param,
-                    cooldownSeconds = cooldown.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+                    cooldownSeconds = AddonRules.clampCooldown(cooldown),
                     matchAny = matchAny,
                     emailTo = emailTo.trim(),
                     emailSubject = emailSubject,

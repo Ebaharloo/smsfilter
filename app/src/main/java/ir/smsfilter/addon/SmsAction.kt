@@ -44,33 +44,47 @@ object AddonBus {
         actions.removeAll { it.id == id }
     }
 
+    // One decision line per SMS, never per rule. Everything is inside runCatching: a trace bug must
+    // not break the receive path.
     fun dispatch(ctx: Context, event: SmsEvent) {
         val now = System.currentTimeMillis()
-        val matched = AddonRules.matching(ctx, event, now)
-        if (matched.isEmpty()) {
-            // No rule claims this SMS: the legacy per-toggle actions still run, unchanged.
-            for (a in actions.toList()) {
-                if (!a.enabled(ctx)) continue
-                try {
-                    a.onSmsReceived(ctx, event)
-                } catch (t: Throwable) {
-                    Log.e("SMSAddon", "action ${a.id} failed", t)
+        var matched: List<AddonRule> = emptyList()
+        val ran = mutableListOf<String>()
+        var miss: String? = null
+        runCatching {
+            matched = AddonRules.matching(ctx, event, now)
+            if (matched.isEmpty()) {
+                // No rule claims this SMS: the legacy per-toggle actions still run, unchanged.
+                for (a in actions.toList()) {
+                    if (!a.enabled(ctx)) continue
+                    try {
+                        a.onSmsReceived(ctx, event)
+                        ran += a.id
+                    } catch (t: Throwable) {
+                        Log.e("SMSAddon", "action ${a.id} failed", t)
+                    }
                 }
+                miss = AddonRules.firstMiss(ctx, event, now) ?: if (ran.isEmpty()) "no rule" else null
+                return@runCatching
             }
-            return
-        }
-        for (rule in matched) {
-            if (!AddonRules.allowedNow(ctx, rule, now)) continue
-            // One failing rule must not stop the rules after it.
-            val ok = try {
-                AddonRules.executeAll(ctx, rule, event)
-            } catch (t: Throwable) {
-                Log.e("SMSAddon", "rule ${rule.id} failed", t)
-                0
+            for (rule in matched) {
+                if (!AddonRules.allowedNow(ctx, rule, now)) {
+                    if (miss == null) miss = "cooldown"
+                    continue
+                }
+                // One failing rule must not stop the rules after it.
+                val ok = try {
+                    AddonRules.executeAll(ctx, rule, event, ran = ran)
+                } catch (t: Throwable) {
+                    Log.e("SMSAddon", "rule ${rule.id} failed", t)
+                    0
+                }
+                // Arming the cooldown on a total failure would swallow the retry window.
+                if (ok > 0) AddonRules.markFired(ctx, rule, now)
+                else if (miss == null) miss = "action failed"
             }
-            // Arming the cooldown on a total failure would swallow the retry window.
-            if (ok > 0) AddonRules.markFired(ctx, rule, now)
-        }
+        }.onFailure { Log.e("SMSAddon", "dispatch failed", it) }
+        AddonRules.recordDecision(ctx, AddonRules.decisionLine(now, event, matched, ran, miss))
     }
 }
 

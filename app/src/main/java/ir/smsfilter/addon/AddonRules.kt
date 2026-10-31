@@ -56,7 +56,10 @@ object AddonRules {
     private const val MAX_REGEX_SUBJECT = 200
     private const val MAX_PATTERN_LEN = 120
     private const val MAX_QUANTIFIERS = 2
-    private const val ADDON_NOTIF_ID = 3000
+    private const val ADDON_NOTIF_ID = 1_000_000
+    private const val DEC_KEY = "addon_decisions"
+    internal const val DEC_MAX = 20
+    const val MAX_COOLDOWN = 86_400
     private val GROUP_PREFIX = Regex("\\(\\?[:=!<]")
     private val NESTED_QUANTIFIER = Regex("\\([^)]*[+*?|][^)]*\\)\\s*[+*{]")
 
@@ -176,7 +179,7 @@ object AddonRules {
         if (!rule.enabled) return false
         val active = conditions(rule, event, nowMillis)
         // An empty list means "no condition" here (true); matching() is what keeps such a rule inert.
-        return active.isEmpty() || active.all { it }
+        return active.isEmpty() || active.all { it.second }
     }
 
     // BuzzKill RuleFinder.b: every rule is tested, matching ones run in priority order.
@@ -186,19 +189,35 @@ object AddonRules {
         return load(ctx).sortedBy { it.priority }.filter { rule ->
             if (!rule.enabled) return@filter false
             val active = conditions(rule, event, nowMillis)
-            (active.isNotEmpty() || rule.matchAny) && active.all { it }
+            (active.isNotEmpty() || rule.matchAny) && active.all { it.second }
         }
     }
 
-    // The conditions matches() evaluates. A raw-blank value is skipped here, which is why a
-    // spaces-only keyword counts as "no condition" and therefore makes the rule inert.
-    private fun conditions(rule: AddonRule, event: SmsEvent, nowMillis: Long): MutableList<Boolean> {
+    // Why this rule said no: the first failing condition, "no conditions" for an inert rule.
+    // The dry-run dialog and the decision trace both read it; null means the rule matches.
+    fun missReason(rule: AddonRule, event: SmsEvent, nowMillis: Long = System.currentTimeMillis()): String? {
+        if (!rule.enabled) return "disabled"
+        val active = conditions(rule, event, nowMillis)
+        return when {
+            active.isEmpty() && !rule.matchAny -> "no conditions"
+            else -> active.firstOrNull { !it.second }?.first
+        }
+    }
+
+    // Same answer for a whole rule set, so a miss in dispatch can name its cause.
+    fun firstMiss(ctx: Context, event: SmsEvent, nowMillis: Long = System.currentTimeMillis()): String? =
+        load(ctx).sortedBy { it.priority }.mapNotNull { missReason(it, event, nowMillis) }.firstOrNull()
+
+    // The conditions matches() evaluates, each with the name the trace/dry-run shows.
+    // A raw-blank value is skipped here, which is why a spaces-only keyword counts as
+    // "no condition" and therefore makes the rule inert.
+    private fun conditions(rule: AddonRule, event: SmsEvent, nowMillis: Long): MutableList<Pair<String, Boolean>> {
         val cal = java.util.Calendar.getInstance().apply { timeInMillis = nowMillis }
-        val active = mutableListOf<Boolean>()
+        val active = mutableListOf<Pair<String, Boolean>>()
         if (rule.senderContains.isNotBlank()) {
             // A term that normalizes to "" would make contains("") match every SMS: unusable, never true.
             val sender = Normalizer.normalize(rule.senderContains)
-            active += sender.isNotEmpty() && Normalizer.normalize(event.sender).contains(sender)
+            active += "sender" to (sender.isNotEmpty() && Normalizer.normalize(event.sender).contains(sender))
         }
         val terms = when {
             rule.keywords.isNotEmpty() -> rule.keywords
@@ -218,29 +237,29 @@ object AddonRules {
                     kw.isNotEmpty() && (body.contains(kw) || squashed.contains(Normalizer.squash(kw)))
                 }
             }
-            active += if (rule.keywordMode.trim().equals("OR", ignoreCase = true)) hits.any { it } else hits.all { it }
+            active += "keyword" to if (rule.keywordMode.trim().equals("OR", ignoreCase = true)) hits.any { it } else hits.all { it }
         }
-        if (rule.minLength > 0) active += event.body.length >= rule.minLength
-        if (rule.maxLength > 0) active += event.body.length <= rule.maxLength
+        if (rule.minLength > 0) active += "length" to (event.body.length >= rule.minLength)
+        if (rule.maxLength > 0) active += "length" to (event.body.length <= rule.maxLength)
         if (rule.daysOfWeek.isNotBlank()) {
             val days = rule.daysOfWeek.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
             if (days.isNotEmpty()) {
-                active += cal.get(java.util.Calendar.DAY_OF_WEEK) in days
+                active += "time" to (cal.get(java.util.Calendar.DAY_OF_WEEK) in days)
             }
         }
         if (rule.startHour >= 0 && rule.endHour >= 0) {
             val h = cal.get(java.util.Calendar.HOUR_OF_DAY)
-            active += if (rule.startHour <= rule.endHour) {
+            active += "time" to if (rule.startHour <= rule.endHour) {
                 h in rule.startHour..rule.endHour
             } else {
                 h >= rule.startHour || h <= rule.endHour
             }
         }
-        if (rule.onlyFromContacts) active += event.fromContact
-        if (rule.onlySpam) active += event.isSpam
-        if (rule.onlyNotSpam) active += !event.isSpam
-        if (rule.otpRequired == true) active += event.otp != null
-        if (rule.otpRequired == false) active += event.otp == null
+        if (rule.onlyFromContacts) active += "contact" to event.fromContact
+        if (rule.onlySpam) active += "spam" to event.isSpam
+        if (rule.onlyNotSpam) active += "spam" to !event.isSpam
+        if (rule.otpRequired == true) active += "otp" to (event.otp != null)
+        if (rule.otpRequired == false) active += "otp" to (event.otp == null)
 
         return active
     }
@@ -262,12 +281,22 @@ object AddonRules {
             .edit().putLong(firedKey(rule), nowMillis).apply()
     }
 
-    fun executeAll(ctx: Context, rule: AddonRule, event: SmsEvent, dryRun: Boolean = false): Int {
+    // Seam: Sms.send needs a radio and the SEND_SMS grant, so the JVM tests swap this.
+    internal var send: (Context, String, String) -> Boolean = { c, a, b -> Sms.send(c, a, b) }
+
+    // Clamp before it reaches the model: 11+ digits used to overflow toIntOrNull() into 0 = "every time".
+    fun clampCooldown(text: String): Int =
+        text.filter { it.isDigit() }.take(9).toIntOrNull()?.coerceAtMost(MAX_COOLDOWN) ?: 0
+
+    fun executeAll(ctx: Context, rule: AddonRule, event: SmsEvent, dryRun: Boolean = false, ran: MutableList<String>? = null): Int {
         var ok = 0
         for (a in rule.actions.ifEmpty { listOf(rule.action) }) {
             // One dead action (no email app, provider refusing the send) must not eat the rest of the rule.
             try {
-                if (execute(ctx, rule.copy(action = a), event, dryRun)) ok++
+                if (execute(ctx, rule.copy(action = a), event, dryRun)) {
+                    ok++
+                    ran?.add(a)
+                }
             } catch (t: Throwable) {
                 Log.e("AddonRules", "action $a of rule ${rule.id} failed", t)
             }
@@ -309,14 +338,10 @@ object AddonRules {
                     ctx.getSharedPreferences(FilterService.PREFS, Context.MODE_PRIVATE)
                         .getString("addon_autoreply_text", "پیام شما دریافت شد").orEmpty()
                 }
-                if (template.isBlank()) false else {
-                    Sms.send(ctx, event.sender, template)
-                    true
-                }
+                if (template.isBlank()) false else send(ctx, event.sender, template)
             } else false
             "forward" -> if (rule.actionParam.isNotBlank()) {
-                Sms.send(ctx, rule.actionParam, event.body)
-                true
+                send(ctx, rule.actionParam, event.body)
             } else false
             "mark_read" -> if (event.threadId > 0) {
                 Sms.markThreadRead(ctx, event.threadId)
@@ -449,10 +474,55 @@ object AddonRules {
             .replace("{otp}", event.otp.orEmpty())
     }
 
+    // ---------- decision trace: one line per SMS, newest first, capped ----------
+
+    private fun prefs(ctx: Context) = ctx.getSharedPreferences(FilterService.PREFS, Context.MODE_PRIVATE)
+
+    fun recentDecisions(ctx: Context): List<String> = try {
+        val a = JSONArray(prefs(ctx).getString(DEC_KEY, "[]") ?: "[]")
+        (0 until a.length()).map { a.getString(it) }
+    } catch (t: Throwable) {
+        emptyList()
+    }
+
+    fun clearDecisions(ctx: Context) {
+        prefs(ctx).edit().remove(DEC_KEY).apply()
+    }
+
+    // Never grows past DEC_MAX and never throws into the receive path.
+    internal fun recordDecision(ctx: Context, line: String) {
+        runCatching {
+            val p = prefs(ctx)
+            val old = JSONArray(p.getString(DEC_KEY, "[]") ?: "[]")
+            val out = JSONArray().put(line)
+            for (i in 0 until minOf(old.length(), DEC_MAX - 1)) out.put(old.get(i))
+            p.edit().putString(DEC_KEY, out.toString()).apply()
+        }.onFailure { Log.w("AddonRules", "decision trace write failed", it) }
+    }
+
+    // Display-ready line: who, what arrived, which rule(s) it hit, what actually ran (or why not).
+    fun decisionLine(millis: Long, event: SmsEvent, matched: List<AddonRule>, ran: List<String>, miss: String?): String {
+        val time = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(millis))
+        val head = "$time · ${event.sender.ifBlank { "?" }} · ${event.body.take(40).replace('\n', ' ')}"
+        return when {
+            matched.isNotEmpty() -> {
+                val names = matched.joinToString(" + ") { it.name.ifBlank { it.id.take(6) } }
+                "$head → $names: ${ran.joinToString(", ").ifBlank { "nothing (${miss ?: "no effect"})" }}"
+            }
+            ran.isNotEmpty() -> "$head → legacy: ${ran.joinToString(", ")}"
+            else -> "$head → no rule (${miss ?: "none"})"
+        }
+    }
+
     // Addon notifications get their own id space: an alert must never replace the SMS notification the
-    // app posted under NOTIF_ID, and one id per conversation keeps the same sender from colliding.
-    internal fun addonNotifyId(event: SmsEvent): Int =
-        ADDON_NOTIF_ID + (event.threadId.takeIf { it > 0 }?.toInt() ?: event.sender.hashCode())
+    // app posted under 2000 + address.hashCode(), and one id per conversation keeps a sender from colliding.
+    // shortcut: 500k-wide windows, so only an exact 500k thread-id offset or a hash tie can collide;
+    // upgrade to a persisted per-sender id map if notifications ever start vanishing.
+    internal fun addonNotifyId(event: SmsEvent): Int {
+        val key = event.threadId.takeIf { it > 0 }?.rem(500_000)
+            ?: ((event.sender.hashCode() and 0x7FFFFFFF) % 500_000).toLong()
+        return ADDON_NOTIF_ID + key.toInt()
+    }
 
     private fun postAddonNotification(ctx: Context, event: SmsEvent, text: String, sound: Boolean): Boolean {
         val nm = ctx.getSystemService(NotificationManager::class.java) ?: return false

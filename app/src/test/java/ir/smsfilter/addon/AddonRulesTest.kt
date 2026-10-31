@@ -3,6 +3,7 @@ package ir.smsfilter.addon
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import android.content.ClipboardManager
@@ -639,5 +640,92 @@ class AddonRulesTest {
             AddonRules.addonNotifyId(e.copy(threadId = 0L, sender = "123")),
             AddonRules.addonNotifyId(e.copy(threadId = 0L, sender = "456"))
         )
+    }
+
+    // ---------- S5: decision trace, dry-run reason, cooldown clamp, honest send ----------
+
+    @Test
+    fun decisionTraceCapsAtTwentyNewestFirst() {
+        val p = FakePrefs()
+        for (i in 0 until 25) AddonRules.recordDecision(p.ctx, "d$i")
+        val lines = AddonRules.recentDecisions(p.ctx)
+        assertEquals(AddonRules.DEC_MAX, lines.size)
+        assertEquals("newest first", "d24", lines.first())
+        assertEquals("oldest kept is the 20th from the end", "d5", lines.last())
+    }
+
+    @Test
+    fun dispatchRecordsOneLinePerSmsWithTheRuleThatRan() {
+        val p = FakeClipPrefs()
+        AddonRules.save(p.ctx, listOf(AddonRule(id = "r1", name = "Copy", keywordContains = "کد", action = "copy_body", cooldownSeconds = 60)))
+        AddonBus.dispatch(p.ctx, event(body = "کد 42"))
+        val line = AddonRules.recentDecisions(p.ctx).single()
+        assertTrue("names the rule: $line", line.contains("Copy"))
+        assertTrue("names the action that ran: $line", line.contains("copy_body"))
+        assertEquals("one SMS is one entry", 1, AddonRules.recentDecisions(p.ctx).size)
+    }
+
+    @Test
+    fun dispatchRecordsTheConditionThatMissed() {
+        val p = FakePrefs()
+        AddonRules.save(p.ctx, listOf(AddonRule(id = "r1", name = "Kod", keywordContains = "کد")))
+        AddonBus.dispatch(p.ctx, event(body = "hello"))
+        val line = AddonRules.recentDecisions(p.ctx).single()
+        assertTrue("says why: $line", line.contains("keyword"))
+        assertEquals("keyword", AddonRules.missReason(AddonRule(keywordContains = "کد"), event(body = "hello")))
+        assertEquals("sender", AddonRules.missReason(
+            AddonRule(senderContains = "999", minLength = 1), event(sender = "123", body = "hello")))
+        assertEquals("no conditions", AddonRules.missReason(AddonRule(), event()))
+        assertNull(AddonRules.missReason(AddonRule(keywordContains = "کد"), event(body = "کد 42")))
+        assertNull(AddonRules.missReason(AddonRule(matchAny = true), event()))
+    }
+
+    @Test
+    fun cooldownBlockedAttemptIsRecordedAsCooldown() {
+        val p = FakeClipPrefs()
+        AddonRules.save(p.ctx, listOf(AddonRule(id = "cd", name = "Cool", keywordContains = "کد", action = "copy_body", cooldownSeconds = 60)))
+        AddonBus.dispatch(p.ctx, event(body = "کد 1"))
+        AddonBus.dispatch(p.ctx, event(body = "کد 2"))
+        val lines = AddonRules.recentDecisions(p.ctx)
+        assertEquals("two SMS, two lines", 2, lines.size)
+        assertTrue("second SMS was blocked: ${lines.first()}", lines.first().contains("cooldown"))
+        assertFalse("first SMS really ran: ${lines.last()}", lines.last().contains("cooldown"))
+    }
+
+    @Test
+    fun clearDecisionsEmptiesTheTrace() {
+        val p = FakePrefs()
+        AddonRules.recordDecision(p.ctx, "x")
+        AddonRules.clearDecisions(p.ctx)
+        assertEquals(emptyList<String>(), AddonRules.recentDecisions(p.ctx))
+    }
+
+    @Test
+    fun cooldownInputClampsInsteadOfOverflowingToZero() {
+        assertEquals("11 digits used to become 0 = every time", 86_400, AddonRules.clampCooldown("99999999999"))
+        assertEquals(AddonRules.MAX_COOLDOWN, AddonRules.clampCooldown("86400"))
+        assertEquals(86_400, AddonRules.clampCooldown("999999999999999999999999"))
+        assertEquals(30, AddonRules.clampCooldown("30"))
+        assertEquals("non-digits never reach the model", 0, AddonRules.clampCooldown("abc"))
+        assertEquals(0, AddonRules.clampCooldown(""))
+    }
+
+    @Test
+    fun sendThatFailsIsNotSuccess() {
+        val p = FakeClipPrefs()
+        val e = event(sender = "123", fromContact = true, body = "hello")
+        val real = AddonRules.send
+        try {
+            AddonRules.send = { _, _, _ -> false }
+            assertFalse("autoreply must report the failed send",
+                AddonRules.execute(p.ctx, AddonRule(action = "autoreply", actionParam = "hi"), e))
+            assertFalse("forward must report the failed send",
+                AddonRules.execute(p.ctx, AddonRule(action = "forward", actionParam = "0912"), e))
+            AddonRules.send = { _, _, _ -> true }
+            assertTrue(AddonRules.execute(p.ctx, AddonRule(action = "autoreply", actionParam = "hi"), e))
+            assertTrue(AddonRules.execute(p.ctx, AddonRule(action = "forward", actionParam = "0912"), e))
+        } finally {
+            AddonRules.send = real
+        }
     }
 }
