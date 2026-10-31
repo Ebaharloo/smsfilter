@@ -493,21 +493,33 @@ object AddonRules {
     internal fun recordDecision(ctx: Context, line: String) {
         runCatching {
             val p = prefs(ctx)
-            val old = JSONArray(p.getString(DEC_KEY, "[]") ?: "[]")
+            // A corrupted pref self-heals: unreadable old value starts a fresh list instead of failing forever.
+            val old = runCatching { JSONArray(p.getString(DEC_KEY, "[]") ?: "[]") }.getOrDefault(JSONArray())
             val out = JSONArray().put(line)
             for (i in 0 until minOf(old.length(), DEC_MAX - 1)) out.put(old.get(i))
             p.edit().putString(DEC_KEY, out.toString()).apply()
         }.onFailure { Log.w("AddonRules", "decision trace write failed", it) }
     }
 
+    // 40 code points, never half a surrogate pair: a lone surrogate is invalid UTF-16 in the stored trace.
+    private fun head40(s: String) = s.substring(0, s.offsetByCodePoints(0, minOf(40, s.codePointCount(0, s.length))))
+
     // Display-ready line: who, what arrived, which rule(s) it hit, what actually ran (or why not).
-    fun decisionLine(millis: Long, event: SmsEvent, matched: List<AddonRule>, ran: List<String>, miss: String?): String {
+    fun decisionLine(
+        millis: Long,
+        event: SmsEvent,
+        matched: List<AddonRule>,
+        ran: List<String>,
+        miss: String?,
+        cooled: List<String> = emptyList()
+    ): String {
         val time = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date(millis))
-        val head = "$time · ${event.sender.ifBlank { "?" }} · ${event.body.take(40).replace('\n', ' ')}"
+        val head = "$time · ${event.sender.ifBlank { "?" }} · ${head40(event.body).replace('\n', ' ')}"
         return when {
             matched.isNotEmpty() -> {
                 val names = matched.joinToString(" + ") { it.name.ifBlank { it.id.take(6) } }
-                "$head → $names: ${ran.joinToString(", ").ifBlank { "nothing (${miss ?: "no effect"})" }}"
+                val cool = if (cooled.isEmpty()) "" else "; cooling: ${cooled.joinToString(", ")}"
+                "$head → $names: ${ran.joinToString(", ").ifBlank { "nothing (${miss ?: "no effect"})" }}$cool"
             }
             ran.isNotEmpty() -> "$head → legacy: ${ran.joinToString(", ")}"
             else -> "$head → no rule (${miss ?: "none"})"

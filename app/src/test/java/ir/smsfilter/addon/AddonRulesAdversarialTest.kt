@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.lang.reflect.Proxy
@@ -1402,11 +1403,11 @@ class AddonRulesAdversarialTest {
     }
 
     /**
-     * Documented gap (not gating): when one rule fires and another is cooling, the line reports only
-     * what ran - the "cooldown" reason is dropped because `ran` is non-empty. Evidence for TEST-S5.md.
+     * F3 (fixed in S6): when one rule fires and another is cooling, the line names both — what ran
+     * and which rule was blocked. Before the fix the cooling reason vanished whenever `ran` was non-empty.
      */
     @Test
-    fun s5MixedFireAndCooldownLineReportsOnlyWhatRan() {
+    fun s6MixedFireAndCoolingNamesBothRules() {
         val p = ClipPrefs()
         val cool = AddonRule(id = "cool", name = "Cool", priority = 1, keywordContains = "کد", actions = listOf("copy_body"), cooldownSeconds = 3600)
         val hot = AddonRule(id = "hot", name = "Hot", priority = 2, keywordContains = "کد", actions = listOf("copy_body"), cooldownSeconds = 0)
@@ -1414,10 +1415,27 @@ class AddonRulesAdversarialTest {
         AddonRules.markFired(p.ctx, cool, System.currentTimeMillis())
         AddonBus.dispatch(p.ctx, evT("کد 42"))
         val line = decisions(p.prefs).single()
-        println("S5 mixed line: $line")
+        println("S6 mixed line: $line")
         assertTrue("names both rules: $line", line.contains("Cool") && line.contains("Hot"))
         assertTrue("reports the action that ran", line.contains("copy_body"))
-        assertFalse("cooldown of the other rule is not mentioned", line.contains("cooldown"))
+        assertTrue("names the cooling rule: $line", line.contains("cooling: Cool"))
+        assertFalse("the rule that fired is not listed as cooling: $line", line.contains("cooling: Cool, Hot"))
+        assertFalse("a blocked rule must not have run twice: $line", line.contains("copy_body, copy_body"))
+    }
+
+    /** F3: cooling-only line still says "cooldown" (no action ran), and still names the rule. */
+    @Test
+    fun s6CoolingOnlyLineStillSaysCooldown() {
+        val p = ClipPrefs()
+        val cool = AddonRule(id = "cool", name = "Cool", keywordContains = "کد", actions = listOf("copy_body"), cooldownSeconds = 3600)
+        rules(p.ctx, cool)
+        AddonRules.markFired(p.ctx, cool, System.currentTimeMillis())
+        AddonBus.dispatch(p.ctx, evT("کد 42"))
+        val line = decisions(p.prefs).single()
+        println("S6 cooling-only line: $line")
+        assertTrue("reason label kept: $line", line.contains("nothing (cooldown)"))
+        assertTrue("and the rule is named: $line", line.contains("cooling: Cool"))
+        assertFalse("nothing ran", line.contains("copy_body"))
     }
 
     @Test
@@ -1452,24 +1470,72 @@ class AddonRulesAdversarialTest {
         assertFalse("newlines are flattened: $multi", multi.contains('\n'))
     }
 
+    // Index of the first unpaired surrogate, or null. A split pair is invalid UTF-16: it survives
+    // SharedPreferences as a replacement char and shows as a box in the Features list.
+    private fun loneSurrogateAt(s: String): Int? {
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c.isHighSurrogate()) {
+                if (i + 1 >= s.length || !s[i + 1].isLowSurrogate()) return i
+                i += 2
+            } else if (c.isLowSurrogate()) return i
+            else i++
+        }
+        return null
+    }
+
     /**
-     * DEFECT (cosmetic, no crash): the 40-char cut is by UTF-16 unit, so an emoji straddling index 40
-     * leaves a lone high surrogate in the pref and in the Features list. Asserting the real behaviour
-     * so the suite stays honest; the fix is one line
-     * (`take(40).let { if (it.last().isHighSurrogate()) it.dropLast(1) else it }`).
+     * F1 (fixed in S6): the 40-char cut is by code point, so an emoji that would straddle the cut is
+     * kept whole instead of leaving a lone high surrogate in the pref and in the Features list.
      */
     @Test
-    fun s5EmojiAtTheCutLeavesALoneHighSurrogate() {
+    fun s6EmojiAtTheCutIsKeptWhole() {
         val body = "a".repeat(39) + "😀" + "tail"
         val line = AddonRules.decisionLine(0L, ev(body = body), emptyList(), emptyList(), "keyword")
         val prefix = line.substringAfter("· 123 · ").substringBefore(" → ")
-        println("S5 truncation: prefix len=${prefix.length} last=U+%04X".format(prefix.last().code))
-        assertFalse("whole pair fits only if the cut moves", prefix.contains("😀"))
-        assertTrue("split happened, not a crash", prefix.last().isHighSurrogate())
-        // still persists and is readable afterwards
+        println("S6 truncation: prefix len=${prefix.length} cps=${prefix.codePointCount(0, prefix.length)}")
+        assertEquals("40 code points is the cap, 41 units because of the pair", 41, prefix.length)
+        assertEquals("40 code points kept", 40, prefix.codePointCount(0, prefix.length))
+        assertTrue("whole pair kept: $prefix", prefix.endsWith("😀"))
+        assertTrue("last unit is the low half", prefix.last().isLowSurrogate())
+        assertNull("no lone surrogate in the line", loneSurrogateAt(line))
+        // still persists and is readable afterwards, pair intact through the JSON round trip
         val p = FakePrefs()
         AddonRules.recordDecision(p.ctx, line)
-        assertEquals(1, decisions(p).size)
+        assertEquals(line, decisions(p).single())
+        assertNull("no lone surrogate after the round trip", loneSurrogateAt(decisions(p).single()))
+    }
+
+    /** F1 table: the cut lands on, before and after a pair, on a 4-byte code point, and on emoji-only text. */
+    @Test
+    fun s6TruncationNeverLeavesALoneSurrogate() {
+        val cases = listOf(
+            "emoji at the cut" to "a".repeat(39) + "😀" + "tail",
+            "emoji before the cut" to "a".repeat(30) + "😀" + "b".repeat(30),
+            "emoji after the cut" to "a".repeat(40) + "😀" + "b",
+            "emoji first" to "😀" + "a".repeat(60),
+            "4-byte code point at the cut" to "a".repeat(39) + "𝄞" + "tail",   // U+1D11E, astral
+            "only emoji" to "😀".repeat(60),
+            "only astral" to "𝄞".repeat(41),
+            "empty" to ""
+        )
+        for ((name, body) in cases) {
+            val prefix = AddonRules.decisionLine(0L, ev(body = body), emptyList(), emptyList(), "keyword")
+                .substringAfter("· 123 · ").substringBefore(" → ")
+            println("S6 trunc '$name': len=${prefix.length} cps=${prefix.codePointCount(0, prefix.length)}")
+            assertNull("$name left a lone surrogate", loneSurrogateAt(prefix))
+            assertTrue("$name kept at most 40 code points", prefix.codePointCount(0, prefix.length) <= 40)
+            // a pair is never half-kept: the kept prefix is exactly a code-point prefix of the body
+            assertTrue("$name is a code-point prefix of the body", body.startsWith(prefix))
+            if (body.codePointCount(0, body.length) <= 40) assertEquals("$name is not truncated at all", body, prefix)
+        }
+        // the emoji right at the boundary is kept whole, not dropped
+        assertTrue(AddonRules.decisionLine(0L, ev(body = "a".repeat(39) + "😀x"), emptyList(), emptyList(), "keyword")
+            .substringAfter("· 123 · ").substringBefore(" → ").endsWith("😀"))
+        val onlyEmoji = AddonRules.decisionLine(0L, ev(body = "😀".repeat(60)), emptyList(), emptyList(), "keyword")
+            .substringAfter("· 123 · ").substringBefore(" → ")
+        assertEquals("only-emoji body keeps exactly 40 emoji", 40, onlyEmoji.codePointCount(0, onlyEmoji.length))
     }
 
     // ---------- S5.3 the trace must never throw into the receive path ----------
@@ -1514,18 +1580,29 @@ class AddonRulesAdversarialTest {
         }
     }
 
-    /** Documented weakness: a corrupted trace value is never repaired, so the trace stays dead until Clear. */
+    /** F2 (fixed in S6): a corrupted trace pref self-heals — the next record starts a fresh list. */
     @Test
-    fun s5CorruptTraceValueDisablesTheTraceUntilClear() {
+    fun s6CorruptTraceValueSelfHealsOnNextRecord() {
+        for (bad in listOf("[not json", "{\"a\":1}", "[\"a\",\"b\"", "\"just a string\"")) {
+            val p = FakePrefs()
+            p.values["addon_decisions"] = bad
+            assertEquals("reads as empty instead of throwing: $bad", emptyList<String>(), decisions(p))
+            AddonRules.recordDecision(p.ctx, "next")
+            println("S6 corrupt '$bad' after one record: ${p.values["addon_decisions"]}")
+            assertEquals("self-healed, next line recorded: $bad", listOf("next"), decisions(p))
+            AddonRules.recordDecision(p.ctx, "second")
+            assertEquals("and keeps appending, newest first: $bad", listOf("second", "next"), decisions(p))
+            // Clear still works on a healed trace
+            AddonRules.clearDecisions(p.ctx)
+            assertEquals(emptyList<String>(), decisions(p))
+            assertFalse("key is removed, not blanked", p.values.containsKey("addon_decisions"))
+        }
+        // a corrupted value must not cost the SMS its line either: the ring buffer cap still holds
         val p = FakePrefs()
-        p.values["addon_decisions"] = "[not json"
-        assertEquals("reads as empty instead of throwing", emptyList<String>(), decisions(p))
-        AddonRules.recordDecision(p.ctx, "next")
-        println("S5 corrupt trace after one record: ${p.values["addon_decisions"]}")
-        assertEquals("no self-heal: still unreadable", emptyList<String>(), decisions(p))
-        AddonRules.clearDecisions(p.ctx)
-        AddonRules.recordDecision(p.ctx, "next")
-        assertEquals(listOf("next"), decisions(p))
+        p.values["addon_decisions"] = "garbage"
+        repeat(25) { AddonRules.recordDecision(p.ctx, "line$it") }
+        assertEquals(AddonRules.DEC_MAX, decisions(p).size)
+        assertEquals("line24", decisions(p).first())
     }
 
     // ---------- S5.4 clampCooldown ----------

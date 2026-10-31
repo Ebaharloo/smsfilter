@@ -19,10 +19,13 @@ Out of scope: screen/DND/BT/geofence/foreground-app conditions, batch/summarize/
 
 | step | state | evidence |
 |---|---|---|
-| S0 gap matrix | running | scout on APK, writes `BUZZKILL-GAP.md` |
+| S0 gap matrix | **PASS** | `BUZZKILL-GAP.md`, 36 rows, feasibility column filled in S6 |
 | S1 normalize | **PASS**, committed `585ebf2` | 86 JVM tests, 0 failed; `TEST-S1.md`; defect (empty-normalized term matched every SMS) found by test team and fixed |
 | S2 keyword list + regex | **PASS**, committed `c4daf44` | 131 JVM tests; `TEST-S2.md`; ReDoS (2 s/rule) found by test team, capped; residual: 2-quantifier O(n²) ~28 ms, 200-char subject cap |
-| S3 all rules + cooldown | next | not started |
+| S3 all rules + cooldown | **PASS**, committed `6029d8f` | `TEST-S3.md` |
+| S4 fire after notify | **PASS**, committed `9400dc7` | `TEST-S4.md` |
+| S5 trace + dry run | **PASS**, committed `136d0f2`/`5f664c4` | `TEST-S5.md`; F1/F2/F3 findings fixed (`AddonTraceFixTest.kt`, 4 tests) |
+| S6 feasibility | **PASS** | every row of `BUZZKILL-GAP.md` marked `done` (13) / `feasible now` (4) / `parked` (19); 4 promoted to S7+ |
 
 ## Teams
 
@@ -86,6 +89,40 @@ $HOME/tools/gradle/gradle-8.9/bin/gradle --no-daemon :app:testDebugUnitTest
 - Features page: "Recent decisions" list, plus a per-rule test button (dry-run against a sample body).
 - Dev tests: trace ring buffer caps at 20, newest first, no crash on empty.
 - Test team: full `scripts/gate.sh` green, release build, no filter-power regression.
+
+## S7+ promoted from the gap matrix
+
+S6 pass over `BUZZKILL-GAP.md`: 13 rows `done`, 4 `feasible now`, 19 `parked`. Only the four below enter the plan, ordered by value per LOC. All four are additive fields on `AddonRule` (`AddonRules.kt`), JVM-testable, no new dependency, no core-filtering touch.
+
+### S7 — `-term` negation in the keyword list (~12 LOC) ← do this one first
+- **Gap row:** AND / OR / NOT (`KeywordMatching$Combination.not`).
+- **Why it matters:** Iranian bank/OTP SMS end with an unsubscribe footer (`لغو11`, `لغو ۱۲`), and marketing SMS reuse the same words (`کد`, `بانک`, `تخفیف`). Today the only way to avoid the footer is to delete the rule part. With negation one rule reads *`کد` AND NOT `لغو`* — OTP copy stays on, marketing stays out.
+- **Change:** a term prefixed `-` must be absent. In `conditions()`, split terms into positive/negative, ignore blank negatives, keep AND/OR semantics over the positives, all negatives must miss.
+- **Tests:** `-لغو` blocks the footer SMS and leaves the clean OTP SMS matching; only-negative term list (`-لغو`) is not inert and matches any SMS without the word; `-` alone or `- ` (blank after strip) is ignored, not "match nothing"; OR mode + one negative.
+- **LOC:** 12.
+
+### S8 — whole-word keyword matching (~15 LOC)
+- **Gap row:** whole-word (`RegexMatcher.d`, `(\W|^)…($|\W)`, IGNORE_CASE).
+- **Why it matters:** `رمز` currently fires on `رمزنگاری` and `رمز عبور` marketing text fires OTP rules; `کد` fires on `کدپستی`. Word mode is what makes a short Persian keyword safe.
+- **Change:** `keywordWholeWord: Boolean` on the rule, save/load; non-regex terms match with `Regex("(\\W|^)" + Pattern.quote(kw) + "(\\W|$)")` on the normalized body, subject still capped at 200 chars via `regexHit`.
+- **Tests:** `رمز` whole-word does not match `رمزنگاری`; matches `رمز: 1234`; ZWNJ/spaced evasion (`ر م ز`) still matches through `squash`; flag off keeps today's substring behavior (regression).
+- **LOC:** 15.
+
+### S9 — `keywordScope`: body / sender / any (~15 LOC)
+- **Gap row:** target field / scope (`KeywordScope` 4 ordinals).
+- **Why it matters:** bank sender IDs (`BankMellat`, `+983000…`) carry the identity, the body carries the action. One rule today must pick a field: `senderContains` *and* body keywords only AND together, so "sender is a bank, body says برداشت" needs two rules and duplicate actions.
+- **Change:** `keywordScope: String = "body"` on the rule (`body` | `sender` | `any` = sender + `\n` + body); save/load; `conditions()` picks the field before normalizing.
+- **Tests:** `any` matches a keyword present only in the sender; `body` (default) does not; `sender` ignores body hits; old saved rule without the field behaves as `body` (migration).
+- **LOC:** 15.
+
+### S10 — per-rule snooze `disabledUntil` (~12 LOC)
+- **Gap row:** enable/disable + temporary override (`RuleDbRepository.i(RuleId, boolean, Instant)`).
+- **Why it matters:** a noisy rule (auto-reply, alert) is usually wrong for an hour, not forever; today the only options are delete or a full disable that the user forgets to undo. Snooze keeps the rule and lets the cooldown-free path resume by itself.
+- **Change:** `disabledUntil: Long = 0` on the rule; `matching()` and `missReason()` treat `now < disabledUntil` as "disabled" (reason `snoozed`); no timer, no service.
+- **Tests:** snoozed rule does not match before its stamp and matches after; `missReason` says `snoozed`; a snoozed rule does not arm its cooldown; old rule with no field is unaffected.
+- **LOC:** 12.
+
+Not promoted (see `BUZZKILL-GAP.md` for the reason on each): keyword tree, per-term `matchType`, multi-range schedules, `Room`/history, all device-state conditions, notification listener.
 
 ## Definition of done
 - `:app:testDebugUnitTest` green including new adversarial tests.

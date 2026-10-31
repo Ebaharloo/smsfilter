@@ -50,6 +50,7 @@ object AddonBus {
         val now = System.currentTimeMillis()
         var matched: List<AddonRule> = emptyList()
         val ran = mutableListOf<String>()
+        val cooled = mutableListOf<String>()
         var miss: String? = null
         runCatching {
             matched = AddonRules.matching(ctx, event, now)
@@ -69,6 +70,7 @@ object AddonBus {
             }
             for (rule in matched) {
                 if (!AddonRules.allowedNow(ctx, rule, now)) {
+                    cooled += rule.name.ifBlank { rule.id.take(6) }
                     if (miss == null) miss = "cooldown"
                     continue
                 }
@@ -84,7 +86,7 @@ object AddonBus {
                 else if (miss == null) miss = "action failed"
             }
         }.onFailure { Log.e("SMSAddon", "dispatch failed", it) }
-        AddonRules.recordDecision(ctx, AddonRules.decisionLine(now, event, matched, ran, miss))
+        AddonRules.recordDecision(ctx, AddonRules.decisionLine(now, event, matched, ran, miss, cooled))
     }
 }
 
