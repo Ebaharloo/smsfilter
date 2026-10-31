@@ -261,15 +261,18 @@ object AddonRules {
             .edit().putLong(firedKey(rule), nowMillis).apply()
     }
 
-    fun executeAll(ctx: Context, rule: AddonRule, event: SmsEvent, dryRun: Boolean = false) {
+    fun executeAll(ctx: Context, rule: AddonRule, event: SmsEvent, dryRun: Boolean = false): Int {
+        var ok = 0
         for (a in rule.actions.ifEmpty { listOf(rule.action) }) {
             // One dead action (no email app, provider refusing the send) must not eat the rest of the rule.
             try {
                 execute(ctx, rule.copy(action = a), event, dryRun)
+                ok++
             } catch (t: Throwable) {
                 Log.e("AddonRules", "action $a of rule ${rule.id} failed", t)
             }
         }
+        return ok
     }
 
     fun execute(ctx: Context, rule: AddonRule, event: SmsEvent, dryRun: Boolean = false) {

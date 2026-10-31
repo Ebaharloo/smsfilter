@@ -522,4 +522,15 @@ class AddonRulesTest {
             event(body = "کد 42"), dryRun = true)
         AddonRules.executeAll(p.ctx, AddonRule(action = "copy_body"), event(), dryRun = true)
     }
+
+    @Test
+    fun allFailedActionsDoNotArmTheCooldown() {
+        val p = FakePrefs()
+        // ContextWrapper(null): every service lookup throws, so no action of this rule can succeed
+        val rule = AddonRule(id = "boom", keywordContains = "کد", action = "copy_otp", cooldownSeconds = 60)
+        rules(p, rule)
+        assertEquals(0, AddonRules.executeAll(p.ctx, rule, event(body = "کد 42", otp = "1234")))
+        AddonBus.dispatch(p.ctx, event(body = "کد 42", otp = "1234"))
+        assertFalse("a failed fire must not start the cooldown", p.values.containsKey("addon_fired_boom"))
+    }
 }

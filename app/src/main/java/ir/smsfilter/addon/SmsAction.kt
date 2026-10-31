@@ -62,12 +62,14 @@ object AddonBus {
         for (rule in matched) {
             if (!AddonRules.allowedNow(ctx, rule, now)) continue
             // One failing rule must not stop the rules after it.
-            try {
+            val ok = try {
                 AddonRules.executeAll(ctx, rule, event)
             } catch (t: Throwable) {
                 Log.e("SMSAddon", "rule ${rule.id} failed", t)
+                0
             }
-            AddonRules.markFired(ctx, rule, now)
+            // Arming the cooldown on a total failure would swallow the retry window.
+            if (ok > 0) AddonRules.markFired(ctx, rule, now)
         }
     }
 }

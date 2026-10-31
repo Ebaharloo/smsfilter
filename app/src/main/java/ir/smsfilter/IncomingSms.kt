@@ -127,7 +127,10 @@ class IncomingSms : BroadcastReceiver() {
             channelsReady = true
         }
 
-        AddonBus.dispatch(ctx, SmsEvent(address, body, date, subId, threadId, isSpam, fromContact, otpOf(body), NOTIF_ID + address.hashCode()))
+        // addon actions must see the notification the app just posted for this SMS, so they run after
+        // every notify() below - and exactly once per message, on each of the three paths.
+        val notifyId = NOTIF_ID + address.hashCode()
+        val event = SmsEvent(address, body, date, subId, threadId, isSpam, fromContact, otpOf(body), notifyId)
 
         if (decision == ir.smsfilter.core.Notify.DIGEST) {
             // one low-priority digest, updated in place - 50 ads/hour must not mean 50 notifications
@@ -142,15 +145,16 @@ class IncomingSms : BroadcastReceiver() {
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
                 .build())
+            AddonBus.dispatch(ctx, event)
             return
         }
 
         if (decision == ir.smsfilter.core.Notify.SILENT) {
             // conversation muted by the user: message is stored, notification suppressed
+            AddonBus.dispatch(ctx, event)
             return
         }
 
-        val notifyId = NOTIF_ID + address.hashCode()
         val reply = RemoteInput.Builder(KEY_REPLY).setLabel("Reply").build()
         val replyIntent = PendingIntent.getBroadcast(
             ctx, 10, Intent(ctx, IncomingSms::class.java).apply {
@@ -189,6 +193,7 @@ class IncomingSms : BroadcastReceiver() {
         }
 
         nm.notify(notifyId, builder.build())
+        AddonBus.dispatch(ctx, event)
     }
 
     private fun handleReply(ctx: Context, intent: Intent) {
