@@ -1265,4 +1265,429 @@ class AddonRulesAdversarialTest {
         assertFalse("failed rule stays unarmed", p.prefs.values.containsKey("addon_fired_bad"))
         assertTrue("the rule after it still fires", p.prefs.values.containsKey("addon_fired_good"))
     }
+
+    // ================= S5: decision trace, clamp, notification id space, honest send =================
+
+    /** FakePrefs with one injected fault, so the trace's "never into the receive path" claim is tested. */
+    private class FaultPrefs(private val fail: String) {
+        private val backing = FakePrefs()
+        val values get() = backing.values
+        val ctx: Context = object : android.content.ContextWrapper(null) {
+            override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences {
+                if (fail == "open") throw IllegalStateException("prefs unavailable")
+                val real = backing.ctx.getSharedPreferences(name, mode)
+                return Proxy.newProxyInstance(
+                    FaultPrefs::class.java.classLoader,
+                    arrayOf(SharedPreferences::class.java)
+                ) { _, m, args ->
+                    when (m.name) {
+                        // read fault: every read throws, so even load()/matching() blow up
+                        "getString" -> if (fail == "read") throw IllegalStateException("read fail")
+                        else real.getString(args[0] as String, args.getOrNull(1) as? String)
+                        "edit" -> if (fail != "write") real.edit() else {
+                            val ed = real.edit()
+                            Proxy.newProxyInstance(
+                                FaultPrefs::class.java.classLoader,
+                                arrayOf(SharedPreferences.Editor::class.java)
+                            ) { _, m2, a2 ->
+                                // only the trace key fails to persist; rules/cooldown still write
+                                if (m2.name == "putString" && a2[0] == "addon_decisions") throw IllegalStateException("disk full")
+                                if (a2 == null) m2.invoke(ed) else m2.invoke(ed, *a2)
+                            } as SharedPreferences.Editor
+                        }
+                        else -> if (args == null) m.invoke(real) else m.invoke(real, *args)
+                    }
+                } as SharedPreferences
+            }
+        }
+    }
+
+    private fun decisions(p: FakePrefs) = AddonRules.recentDecisions(p.ctx)
+
+    // ---------- S5.1 trace shape ----------
+
+    @Test
+    fun s5TraceCapsAtExactlyTwentyNewestFirst() {
+        val p = FakePrefs()
+        repeat(20) { AddonRules.recordDecision(p.ctx, "l$it") }
+        assertEquals("20 entries is the cap, reached without loss", 20, decisions(p).size)
+        assertEquals("l19", decisions(p).first())
+        assertEquals("l0", decisions(p).last())
+
+        repeat(5) { AddonRules.recordDecision(p.ctx, "n$it") }
+        val after = decisions(p)
+        assertEquals("never 21", AddonRules.DEC_MAX, after.size)
+        assertEquals("newest first", "n4", after.first())
+        assertEquals("oldest five dropped", "l5", after.last())
+        assertFalse("dropped entries are really gone", after.contains("l4"))
+    }
+
+    @Test
+    fun s5OneEntryPerSmsEvenWhenThreeRulesMatch() {
+        val p = ClipPrefs()
+        rules(
+            p.ctx,
+            AddonRule(id = "a", name = "Alpha", priority = 1, keywordContains = "کد", actions = listOf("copy_body")),
+            AddonRule(id = "b", name = "Beta", priority = 2, keywordContains = "کد", actions = listOf("copy_body")),
+            AddonRule(id = "c", name = "Gamma", priority = 3, keywordContains = "کد", actions = listOf("copy_body"))
+        )
+        AddonBus.dispatch(p.ctx, evT("کد 42"))
+        val lines = decisions(p.prefs)
+        assertEquals("3 rules, still ONE line", 1, lines.size)
+        val line = lines.single()
+        for (name in listOf("Alpha", "Beta", "Gamma")) assertTrue("names $name: $line", line.contains(name))
+
+        // 21 SMS with 3 matching rules each -> still capped at 20 lines total
+        repeat(20) { AddonBus.dispatch(p.ctx, evT("کد 42")) }
+        assertEquals(AddonRules.DEC_MAX, decisions(p.prefs).size)
+    }
+
+    @Test
+    fun s5MissNamesTheConditionThatMissed() {
+        // keyword
+        var p = prefs(null)
+        rules(p.ctx, AddonRule(id = "k", name = "Kod", keywordContains = "پرداخت"))
+        AddonBus.dispatch(p.ctx, evT("کد 42"))
+        assertTrue("keyword label: ${decisions(p).single()}", decisions(p).single().contains("no rule (keyword)"))
+
+        // sender
+        p = prefs(null)
+        rules(p.ctx, AddonRule(id = "s", senderContains = "9999"))
+        AddonBus.dispatch(p.ctx, evT("anything"))
+        assertTrue("sender label", decisions(p).single().contains("(sender)"))
+
+        // length
+        p = prefs(null)
+        rules(p.ctx, AddonRule(id = "l", minLength = 999))
+        AddonBus.dispatch(p.ctx, evT("short"))
+        assertTrue("length label", decisions(p).single().contains("(length)"))
+
+        // otp
+        p = prefs(null)
+        rules(p.ctx, AddonRule(id = "o", otpRequired = true))
+        AddonBus.dispatch(p.ctx, SmsEvent("123", "hello", 0L, 0, 7L, false, false, null, 0))
+        assertTrue("otp label", decisions(p).single().contains("(otp)"))
+
+        // disabled / inert rules have their own labels
+        p = prefs(null)
+        rules(p.ctx, AddonRule(id = "off", keywordContains = "کد", enabled = false))
+        AddonBus.dispatch(p.ctx, evT("کد 42"))
+        assertTrue("disabled label", decisions(p).single().contains("(disabled)"))
+
+        p = prefs(null)
+        rules(p.ctx, AddonRule(id = "inert"))
+        AddonBus.dispatch(p.ctx, evT("anything"))
+        assertTrue("inert label: ${decisions(p).single()}", decisions(p).single().contains("(no conditions)"))
+    }
+
+    @Test
+    fun s5CooldownBlockedAndActionFailedAreLabelled() {
+        // cooldown
+        var p = ClipPrefs()
+        val cool = AddonRule(id = "cool", name = "Cool", keywordContains = "کد", actions = listOf("copy_body"), cooldownSeconds = 3600)
+        rules(p.ctx, cool)
+        AddonRules.markFired(p.ctx, cool, System.currentTimeMillis())
+        AddonBus.dispatch(p.ctx, evT("کد 42"))
+        assertTrue("cooldown label: ${decisions(p.prefs).single()}", decisions(p.prefs).single().contains("cooldown"))
+        assertFalse("a blocked rule must not have run", decisions(p.prefs).single().contains("copy_body"))
+
+        // action failed: no clipboard service, so copy_otp cannot do anything
+        p = ClipPrefs()
+        val dead = AddonRule(id = "dead", name = "Dead", keywordContains = "کد", actions = listOf("copy_otp"), cooldownSeconds = 60)
+        rules(p.ctx, dead)
+        AddonBus.dispatch(p.ctx, SmsEvent("123", "کد 42", 0L, 0, 7L, false, false, null, 0))
+        val line = decisions(p.prefs).single()
+        assertTrue("action failed label: $line", line.contains("nothing (action failed)"))
+        assertFalse(p.prefs.values.containsKey("addon_fired_dead"))
+    }
+
+    /**
+     * Documented gap (not gating): when one rule fires and another is cooling, the line reports only
+     * what ran - the "cooldown" reason is dropped because `ran` is non-empty. Evidence for TEST-S5.md.
+     */
+    @Test
+    fun s5MixedFireAndCooldownLineReportsOnlyWhatRan() {
+        val p = ClipPrefs()
+        val cool = AddonRule(id = "cool", name = "Cool", priority = 1, keywordContains = "کد", actions = listOf("copy_body"), cooldownSeconds = 3600)
+        val hot = AddonRule(id = "hot", name = "Hot", priority = 2, keywordContains = "کد", actions = listOf("copy_body"), cooldownSeconds = 0)
+        rules(p.ctx, cool, hot)
+        AddonRules.markFired(p.ctx, cool, System.currentTimeMillis())
+        AddonBus.dispatch(p.ctx, evT("کد 42"))
+        val line = decisions(p.prefs).single()
+        println("S5 mixed line: $line")
+        assertTrue("names both rules: $line", line.contains("Cool") && line.contains("Hot"))
+        assertTrue("reports the action that ran", line.contains("copy_body"))
+        assertFalse("cooldown of the other rule is not mentioned", line.contains("cooldown"))
+    }
+
+    @Test
+    fun s5ClearEmptiesTheTraceAndTheNextSmsStartsFresh() {
+        val p = ClipPrefs()
+        rules(p.ctx, AddonRule(id = "r", keywordContains = "کد", actions = listOf("copy_body")))
+        AddonBus.dispatch(p.ctx, evT("کد 42"))
+        assertFalse(decisions(p.prefs).isEmpty())
+        AddonRules.clearDecisions(p.ctx)
+        assertEquals(emptyList<String>(), decisions(p.prefs))
+        assertFalse("key is removed, not blanked", p.prefs.values.containsKey("addon_decisions"))
+        AddonBus.dispatch(p.ctx, evT("کد 43"))
+        assertEquals("trace keeps working after Clear", 1, decisions(p.prefs).size)
+    }
+
+    // ---------- S5.2 truncation / unicode ----------
+
+    @Test
+    fun s5BodyPrefixIsFortyCharsForPersianAndNeverThrows() {
+        val persian = "کد تخفیف ویژه فروشگاه برای شما " + "سلام ".repeat(20)
+        val line = AddonRules.decisionLine(0L, ev(body = persian), emptyList(), emptyList(), "keyword")
+        val prefix = line.substringAfter("· 123 · ").substringBefore(" → ")
+        assertEquals("40 code units is the documented cap", 40, prefix.length)
+        assertEquals(persian.take(40), prefix)
+        // survives the JSON round trip that the real prefs do
+        val p = FakePrefs()
+        AddonRules.recordDecision(p.ctx, line)
+        assertEquals(line, decisions(p).single())
+
+        // newline in the body must not break the one-line-per-SMS layout
+        val multi = AddonRules.decisionLine(0L, ev(body = "a\nb\nc"), emptyList(), emptyList(), "keyword")
+        assertFalse("newlines are flattened: $multi", multi.contains('\n'))
+    }
+
+    /**
+     * DEFECT (cosmetic, no crash): the 40-char cut is by UTF-16 unit, so an emoji straddling index 40
+     * leaves a lone high surrogate in the pref and in the Features list. Asserting the real behaviour
+     * so the suite stays honest; the fix is one line
+     * (`take(40).let { if (it.last().isHighSurrogate()) it.dropLast(1) else it }`).
+     */
+    @Test
+    fun s5EmojiAtTheCutLeavesALoneHighSurrogate() {
+        val body = "a".repeat(39) + "😀" + "tail"
+        val line = AddonRules.decisionLine(0L, ev(body = body), emptyList(), emptyList(), "keyword")
+        val prefix = line.substringAfter("· 123 · ").substringBefore(" → ")
+        println("S5 truncation: prefix len=${prefix.length} last=U+%04X".format(prefix.last().code))
+        assertFalse("whole pair fits only if the cut moves", prefix.contains("😀"))
+        assertTrue("split happened, not a crash", prefix.last().isHighSurrogate())
+        // still persists and is readable afterwards
+        val p = FakePrefs()
+        AddonRules.recordDecision(p.ctx, line)
+        assertEquals(1, decisions(p).size)
+    }
+
+    // ---------- S5.3 the trace must never throw into the receive path ----------
+
+    @Test
+    fun s5DispatchSurvivesPrefsThatCannotOpen() {
+        withSentinel { sentinel ->
+            val ctx = FaultPrefs("open").ctx
+            try {
+                AddonBus.dispatch(ctx, ev(body = "کد 42", otp = "1234"))
+            } catch (t: Throwable) {
+                throw AssertionError("dispatch threw into the receive path: ${t.javaClass.name}", t)
+            }
+            assertEquals("fail closed: no action might run when the rules cannot be read", 0, sentinel.calls)
+        }
+    }
+
+    @Test
+    fun s5DispatchSurvivesARuleSetThatCannotBeRead() {
+        withSentinel { sentinel ->
+            val ctx = FaultPrefs("read").ctx
+            try {
+                AddonBus.dispatch(ctx, ev(body = "کد 42", otp = "1234"))
+            } catch (t: Throwable) {
+                throw AssertionError("dispatch threw into the receive path: ${t.javaClass.name}", t)
+            }
+            assertEquals("fail closed, consistently: legacy actions are not run when matching throws", 0, sentinel.calls)
+            // and the failed trace write is contained too: nothing was recorded, nothing blew up
+            assertEquals(emptyList<String>(), AddonRules.recentDecisions(ctx))
+        }
+    }
+
+    @Test
+    fun s5TraceWriteFailureDoesNotStopTheActions() {
+        withSentinel { sentinel ->
+            val f = FaultPrefs("write")
+            // no rules -> legacy path; the trace write for this SMS cannot persist
+            AddonBus.dispatch(f.ctx, ev(body = "hello", otp = "1"))
+            assertEquals("the trace write failing must not eat the SMS handling", 1, sentinel.calls)
+            assertEquals("nothing recorded, as expected", emptyList<String>(), AddonRules.recentDecisions(f.ctx))
+            assertFalse("and the key is not half-written", f.values.containsKey("addon_decisions"))
+        }
+    }
+
+    /** Documented weakness: a corrupted trace value is never repaired, so the trace stays dead until Clear. */
+    @Test
+    fun s5CorruptTraceValueDisablesTheTraceUntilClear() {
+        val p = FakePrefs()
+        p.values["addon_decisions"] = "[not json"
+        assertEquals("reads as empty instead of throwing", emptyList<String>(), decisions(p))
+        AddonRules.recordDecision(p.ctx, "next")
+        println("S5 corrupt trace after one record: ${p.values["addon_decisions"]}")
+        assertEquals("no self-heal: still unreadable", emptyList<String>(), decisions(p))
+        AddonRules.clearDecisions(p.ctx)
+        AddonRules.recordDecision(p.ctx, "next")
+        assertEquals(listOf("next"), decisions(p))
+    }
+
+    // ---------- S5.4 clampCooldown ----------
+
+    @Test
+    fun s5ClampCooldownTable() {
+        val table = listOf(
+            "" to 0,
+            "abc" to 0,
+            "آ" to 0,
+            "-5" to 5,                       // sign is dropped, never a negative window
+            "0" to 0,                        // 0 keeps its "every time" meaning
+            "30" to 30,
+            "  30  " to 30,
+            "86400" to 86_400,
+            "86401" to 86_400,
+            "999999999" to 86_400,
+            "999999999999" to 86_400,
+            "9007199254740993" to 86_400,    // 2^53+1
+            "2147483648" to 86_400,
+            "8 6 4 0 1" to 86_400,
+            "۶۰" to 60,                      // Persian digits
+            "۱۲۳۴" to 1234,
+            "٩٩٩٩٩٩٩٩٩" to 86_400          // Arabic-Indic 9 digits
+        )
+        for ((input, want) in table) {
+            val got = AddonRules.clampCooldown(input)
+            println("S5 clamp '$input' -> $got")
+            assertEquals("input '$input'", want, got)
+            assertTrue("input '$input' must stay in 0..${AddonRules.MAX_COOLDOWN}", got in 0..AddonRules.MAX_COOLDOWN)
+        }
+    }
+
+    // ---------- S5.5 notification id space ----------
+
+    @Test
+    fun s5AddonIdsOccupySixDigitsAboveTheSmsIds() {
+        val e = evT("کد 42", threadId = 1L)
+        // thread path sweeps the whole window, so the range claim is checked exhaustively
+        var min = Int.MAX_VALUE
+        var max = Int.MIN_VALUE
+        val ids = HashSet<Int>(600_000)
+        for (t in 1L..499_999L) {
+            val id = AddonRules.addonNotifyId(e.copy(threadId = t))
+            ids += id
+            if (id < min) min = id
+            if (id > max) max = id
+        }
+        assertEquals("one id per thread inside the window", 499_999, ids.size)
+        assertEquals("lowest thread-path id", 1_000_001, min)
+        assertEquals("highest addon id", 1_499_999, max)
+        assertEquals("hash path can reach the window floor", 1_000_000, AddonRules.addonNotifyId(e.copy(threadId = 0L, sender = "")))
+        // tail collision: only an exact 500k offset or a hash tie can fold back into the window
+        assertEquals(AddonRules.addonNotifyId(e.copy(threadId = 7L)), AddonRules.addonNotifyId(e.copy(threadId = 500_007L)))
+        // sender fallback stays inside the same window
+        for (s in listOf("", "1", "09121234567", "Bank", "😀😀")) {
+            val id = AddonRules.addonNotifyId(e.copy(threadId = 0L, sender = s))
+            assertTrue("hash path for '$s' out of window: $id", id in 1_000_000..1_499_999)
+        }
+        assertTrue("the app's filter notification id is nowhere near it", e.notifyId < 1_000_000)
+    }
+
+    /**
+     * The exact residual case, with a live reproduction: an SMS notification id is
+     * 2000 + address.hashCode(), so it lands in the addon window iff hashCode is in
+     * [998 000, 1 497 999]. "09857893333".hashCode() == 1 283 250 sits inside it, and an addon
+     * notification for thread 285 250 gets exactly 1 285 250.
+     */
+    @Test
+    fun s5CollisionNeedsASenderHashInsideTheWindow() {
+        val lo = 1_000_000 - 2000
+        val hi = 1_499_999 - 2000
+        fun smsId(sender: String) = 2000 + sender.hashCode()
+
+        for (s in listOf("09121234567", "09351234567", "+989121234567", "1000", "Bank", "AD", "90001234", "123")) {
+            assertTrue("'$s' hash ${s.hashCode()} unexpectedly inside [$lo,$hi]", s.hashCode() !in lo..hi)
+            assertTrue(smsId(s) !in 1_000_000..1_499_999)
+        }
+
+        val collidingSender = "09857893333"
+        assertEquals(1_283_250, collidingSender.hashCode())
+        assertEquals(1_285 250, smsId(collidingSender))
+        assertEquals(
+            "concrete collision: hash in the window + thread id = hash-998000",
+            1_285 250,
+            AddonRules.addonNotifyId(evT("x").copy(threadId = 285_250L))
+        )
+        // probability, stated as arithmetic: 500 000 / 2^32 per address, times the thread aliasing
+        assertTrue("window is 500k wide", hi - lo + 1 == 500_000)
+    }
+
+    // ---------- S5.6 honest send (autoreply / forward) ----------
+
+    private fun withSend(stub: (Context, String, String) -> Boolean, block: () -> Unit) {
+        val real = AddonRules.send
+        AddonRules.send = stub
+        try { block() } finally { AddonRules.send = real }
+    }
+
+    @Test
+    fun s5FailedAutoreplyIsNotSuccessAndDoesNotArm() {
+        val p = ClipPrefs()
+        val r = AddonRule(id = "ar", name = "Reply", keywordContains = "کد", action = "autoreply",
+            actionParam = "got it", cooldownSeconds = 60)
+        rules(p.ctx, r)
+        val e = SmsEvent("09121234567", "کد 42", 0L, 0, 7L, false, true, "1234", 0)
+
+        var sent: Pair<String, String>? = null
+        withSend({ _, a, b -> sent = a to b; false }) {
+            assertFalse("execute() must report the refused send", AddonRules.execute(p.ctx, r, e))
+            assertEquals(0, AddonRules.executeAll(p.ctx, r, e))
+            AddonBus.dispatch(p.ctx, e)
+            assertEquals("the template went to the sender", "09121234567" to "got it", sent)
+            assertFalse("a refused send must not arm the cooldown", p.prefs.values.containsKey("addon_fired_ar"))
+            assertTrue("so the next SMS retries", AddonRules.allowedNow(p.ctx, r, System.currentTimeMillis()))
+            assertTrue("and the trace says why: ${decisions(p.prefs).single()}", decisions(p.prefs).single().contains("action failed"))
+        }
+
+        withSend({ _, _, _ -> true }) {
+            assertTrue("a real send is success", AddonRules.execute(p.ctx, r, e))
+            AddonBus.dispatch(p.ctx, e)
+            assertTrue("success arms", p.prefs.values.containsKey("addon_fired_ar"))
+            assertFalse("armed means blocked now", AddonRules.allowedNow(p.ctx, r, System.currentTimeMillis()))
+            val line = decisions(p.prefs).first()
+            assertTrue("trace names the action: $line", line.contains("autoreply"))
+        }
+    }
+
+    @Test
+    fun s5FailedForwardIsNotSuccessAndDoesNotArm() {
+        val p = ClipPrefs()
+        val r = AddonRule(id = "fw", name = "Fwd", keywordContains = "کد", action = "forward",
+            actionParam = "09120000000", cooldownSeconds = 60)
+        rules(p.ctx, r)
+        val e = SmsEvent("09121234567", "کد 42", 0L, 0, 7L, false, false, null, 0)
+
+        var sent: Pair<String, String>? = null
+        withSend({ _, a, b -> sent = a to b; false }) {
+            assertFalse(AddonRules.execute(p.ctx, r, e))
+            AddonBus.dispatch(p.ctx, e)
+            assertEquals("the whole body is forwarded", "09120000000" to "کد 42", sent)
+            assertFalse("failed forward must not arm", p.prefs.values.containsKey("addon_fired_fw"))
+        }
+        withSend({ _, _, _ -> true }) {
+            assertTrue(AddonRules.execute(p.ctx, r, e))
+            AddonBus.dispatch(p.ctx, e)
+            assertTrue(p.prefs.values.containsKey("addon_fired_fw"))
+        }
+    }
+
+    @Test
+    fun s5GuardThatNeverCallsSendIsNotAFailedSend() {
+        val p = ClipPrefs()
+        var called = 0
+        withSend({ _, _, _ -> called++; true }) {
+            // spam: autoreply never reaches the seam, so it must not claim success either
+            assertFalse(AddonRules.execute(p.ctx, AddonRule(action = "autoreply", actionParam = "x"),
+                SmsEvent("1", "b", 0L, 0, 1L, true, true, null, 0)))
+            // no recipient: forward with a blank param cannot be sent
+            assertFalse(AddonRules.execute(p.ctx, AddonRule(action = "forward", actionParam = " "),
+                SmsEvent("1", "b", 0L, 0, 1L, false, false, null, 0)))
+            assertEquals("guard-outs never call the seam", 0, called)
+        }
+    }
 }
