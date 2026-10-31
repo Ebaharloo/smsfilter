@@ -17,6 +17,7 @@ Plan + evidence: `PLAN-buzzkill-fix.md`, `BUZZKILL-GAP.md`. Test reports: `TEST-
 No device run. UI and notification effects are code-read only.
 
 ## Next
+0. S7 is paused mid-work: `git stash list` has `S7 -term negation WIP (untested)` — pop it (`git stash pop`), run the tests, then give it to the test team. HEAD is clean at `2693bc8`.
 1. S7 `-term` negation (~12 LOC) — bank OTP vs ad in one rule.
 2. S8 whole-word — MUST set `Pattern.UNICODE_CHARACTER_CLASS`; ASCII `\W` breaks Persian (proved).
 3. S10 snooze needs a UI chip, not just the field.
