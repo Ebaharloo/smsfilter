@@ -1767,4 +1767,240 @@ class AddonRulesAdversarialTest {
             assertEquals("guard-outs never call the seam", 0, called)
         }
     }
+
+    // ================= S7: "-term" negation =================
+
+    /** Test 1: OTP survives, ad carrying the negative term does not, in every Persian/Arabic variant. */
+    @Test
+    fun s7NegativeTermSeparatesOtpFromAdInEveryVariant() {
+        val r = kw("کد", "-لغو")
+        assertTrue("plain OTP", AddonRules.matches(r, ev(body = "کد تایید شما: 12345")))
+        assertTrue("Arabic kaf/yeh OTP", AddonRules.matches(r, ev(body = "كد تاييد شما: 12345")))
+        assertTrue("OTP with tatweel in the body", AddonRules.matches(r, ev(body = "کـد تایید: 12345")))
+
+        assertFalse("plain ad", AddonRules.matches(r, ev(body = "کد تخفیف، لغو11 ویژه")))
+        assertFalse("spaced ad", AddonRules.matches(r, ev(body = "کد تخفیف، لغو 11 ویژه")))
+        assertFalse("ZWNJ ad", AddonRules.matches(r, ev(body = "کد تخفیف، لغو\u200C11 ویژه")))
+        assertFalse("letter-spaced evasion", AddonRules.matches(r, ev(body = "کد تخفیف، ل غ و 11")))
+        assertFalse("tatweel in the body", AddonRules.matches(r, ev(body = "کد تخفیف، لغـو11")))
+        assertFalse("Persian digits right after the term", AddonRules.matches(r, ev(body = "کد تخفیف، لغو ۱۱")))
+
+        // the negative itself may be typed in Arabic letters / with a tatweel; normalization still folds it
+        assertFalse("Arabic-form negative term", AddonRules.matches(kw("کد", "-تاييد"), ev(body = "کد تایید شما")))
+        assertFalse("tatweel negative term", AddonRules.matches(kw("کد", "-لغـو"), ev(body = "کد، لغو 11")))
+        assertTrue("Arabic-form negative absent", AddonRules.matches(kw("کد", "-تاييد"), ev(body = "کد ورود شما")))
+
+        // Residual: negatives share the squash path, so they over-exclude text they never name.
+        // Fails safe for ad-blocking, but it can kill an OTP rule (S7-G4 in TEST-S7.md).
+        assertFalse("negative '12 34' also kills body '1234'", AddonRules.matches(kw("کد", "-12 34"), ev(body = "کد 1234")))
+        assertFalse("negative '1234' also kills body '12 34'", AddonRules.matches(kw("کد", "-1234"), ev(body = "کد 12 34")))
+    }
+
+    /** Test 2: two negatives are each fatal on their own; both absent passes. */
+    @Test
+    fun s7AndModeTwoNegativesFailOnEitherAndPassOnNeither() {
+        val r = kw("کد", "-لغو", "-تخفیف")
+        assertTrue(AddonRules.matches(r, ev(body = "کد تایید 12345")))
+        assertFalse("لغو alone kills it", AddonRules.matches(r, ev(body = "کد تایید، لغو 11")))
+        assertFalse("تخفیف alone kills it", AddonRules.matches(r, ev(body = "کد تایید، تخفیف ویژه")))
+        assertFalse("both present", AddonRules.matches(r, ev(body = "کد، لغو 11، تخفیف")))
+        assertFalse("no positive", AddonRules.matches(r, ev(body = "سلام")))
+    }
+
+    /** Test 3: OR joins only the positives; every negative is still veto power. */
+    @Test
+    fun s7OrModeNegativesNeverJoinTheOr() {
+        val r = kw("کد", "رمز", "-لغو", mode = "OR")
+        assertTrue("first positive", AddonRules.matches(r, ev(body = "کد 42")))
+        assertTrue("second positive", AddonRules.matches(r, ev(body = "رمز یکبار مصرف")))
+        assertFalse("OR hit + negative hit", AddonRules.matches(r, ev(body = "رمز، لغو 11")))
+        assertFalse("neither positive", AddonRules.matches(r, ev(body = "سلام")))
+        // the negative must not be OR'ed in as a positive: a body with لغو and no positive fails
+        assertFalse("negative present but no positive", AddonRules.matches(r, ev(body = "لغو 11")))
+
+        val onlyNegative = kw("-لغو", mode = "OR")
+        assertTrue("only-negative list matches a clean body", AddonRules.matches(onlyNegative, ev(body = "کد 42")))
+        assertFalse("only-negative list fails on a hit", AddonRules.matches(onlyNegative, ev(body = "لغو 11")))
+    }
+
+    /** Test 4: the escape is only honoured as the leading pair; document what follows. */
+    @Test
+    fun s7HyphenEscapeAndBackslashNegation() {
+        val literal = kw("\\-abc")
+        assertTrue(AddonRules.matches(literal, ev(body = "promo -abc here")))
+        assertFalse("hyphen required", AddonRules.matches(literal, ev(body = "promo abc here")))
+        assertFalse("not a negation", AddonRules.keywordTerm("\\-abc").first)
+        assertEquals("-abc", AddonRules.keywordTerm("\\-abc").second)
+
+        // The escape is only unwrapped at index 0. After a "-", the remainder is taken verbatim, so
+        // "-\abc" negates the literal text "\abc" and "-\-abc" negates the literal text "\-abc".
+        // Consequence (S7-G1 in TEST-S7.md): there is NO syntax for "must not contain -abc".
+        assertEquals(true to "\\abc", AddonRules.keywordTerm("-\\abc"))
+        assertFalse(AddonRules.matches(kw("-\\abc"), ev(body = "x \\abc y")))
+        assertTrue(AddonRules.matches(kw("-\\abc"), ev(body = "x abc y")))
+        assertEquals(true to "\\-abc", AddonRules.keywordTerm("-\\-abc"))
+        assertTrue("literal '-abc' is not what this negates", AddonRules.matches(kw("-\\-abc"), ev(body = "promo -abc here")))
+        assertFalse(AddonRules.matches(kw("-\\-abc"), ev(body = "odd \\-abc text")))
+        // keywordTerm is a pure prefix parse: only the first hyphen decides, no trimming
+        assertEquals(true to "-abc", AddonRules.keywordTerm("--abc"))
+        assertEquals(false to " -abc", AddonRules.keywordTerm(" -abc"))
+    }
+
+    /** Test 5: the S1/S2 unusable-term invariants, re-run over the negation code path. */
+    @Test
+    fun s7UnusableTermsStayUnsatisfiable() {
+        val unusable = listOf("", "   ", "-", "--", "\u200C", "\u0640", "\u064B\u0652", "\u200C\u0640")
+        for (t in unusable) for (mode in listOf("AND", "OR")) for (regex in listOf(false, true)) {
+            assertFalse("unusable term ${t.map { it.code }} mode=$mode regex=$regex",
+                AddonRules.matches(kw(t, mode = mode, regex = regex), ev(body = "anything")))
+        }
+        // inside OR they must not widen
+        assertFalse(AddonRules.matches(kw("", "کد", mode = "OR", regex = true), ev(body = "سلام")))
+        assertFalse(AddonRules.matches(kw("\u200C", "کد", mode = "OR"), ev(body = "سلام")))
+        assertTrue(AddonRules.matches(kw("\u200C", "کد", mode = "OR"), ev(body = "کد 42")))
+        // inside AND the blank/ZWNJ/tatweel terms still fail the rule
+        for (t in listOf("", "   ", "\u200C", "\u0640")) {
+            assertFalse("AND with '$t'", AddonRules.matches(kw("کد", t, mode = "AND"), ev(body = "کد 42")))
+        }
+        // '-' and '--' are DROPPED when a usable sibling exists: "کد AND -" behaves like "کد".
+        // This is actual S7 behaviour; TEST-S7.md records the divergence from "unsatisfiable positive".
+        assertTrue("'-' dropped next to a usable positive", AddonRules.matches(kw("کد", "-"), ev(body = "کد 42")))
+        assertTrue("'--' dropped next to a usable positive", AddonRules.matches(kw("کد", "--"), ev(body = "کد 42")))
+        assertFalse("'-' does not rescue a failing AND", AddonRules.matches(kw("کد", "-"), ev(body = "سلام")))
+        // legacy single-keyword path keeps its old "blank = no condition" contract
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = "   "), ev(body = "anything")))
+        assertFalse("a list term is still an unsatisfiable condition", AddonRules.matches(kw("   "), ev(body = "anything")))
+    }
+
+    /** Test 6: regex negatives, including the unusable-after-strip case. */
+    @Test
+    fun s7RegexNegativesGateTheSameStringAsTheEditor() {
+        val r = kw("-^09\\d{9}$", regex = true)
+        assertTrue(AddonRules.matches(r, ev(body = "hello")))
+        assertFalse("phone-shaped body excluded", AddonRules.matches(r, ev(body = "09123456789")))
+        assertFalse("Persian digits normalize before the regex", AddonRules.matches(r, ev(body = "۰۹۱۲۳۴۵۶۷۸۹")))
+        // strip then gate: the editor and the runtime judge the same string
+        assertEquals("^09\\d{9}$", AddonRules.keywordTerm("-^09\\d{9}$").second)
+        assertTrue(AddonRules.regexUsable(AddonRules.keywordTerm("-^09\\d{9}$").second))
+        assertFalse("bare '-' is still unusable after stripping", AddonRules.regexUsable(AddonRules.keywordTerm("-").second))
+
+        // positive sibling + negated regex: exclusion still applies
+        assertFalse("positive hit but phone body", AddonRules.matches(kw("^09", "-^09\\d{9}$", mode = "AND", regex = true), ev(body = "09123456789")))
+        assertTrue(AddonRules.matches(kw("^09", "-^09\\d{9}$", mode = "AND", regex = true), ev(body = "0912345678")))
+    }
+
+    /**
+     * S7-D1 (fixed): a negative that can never hit ("-(" in regex mode, "-\u200C") used to be
+     * vacuously satisfied and widened the rule to everything. It now makes the keyword condition
+     * false, alone and next to a usable positive, in AND and in OR. A bare "-" next to a usable
+     * term is dropped, so the rule behaves like the positive alone.
+     */
+    @Test
+    fun s7UnusableNegativeFailsTheKeywordConditionInsteadOfWidening() {
+        assertFalse("precondition: '(' is unusable", AddonRules.regexUsable("("))
+        val e = ev(body = "anything at all")
+
+        // refused regex negative alone: never matches, never reaches the executor
+        val p = prefs(null)
+        rules(p.ctx, AddonRule(id = "hole", name = "hole", keywords = listOf("-("), keywordRegex = true, action = "copy_body"))
+        assertFalse(AddonRules.matches(AddonRule(keywords = listOf("-("), keywordRegex = true), e))
+        assertTrue("matching() must not hand it to the executor", AddonRules.matching(p.ctx, e, 0L).isEmpty())
+        assertEquals("keyword", AddonRules.missReason(AddonRule(keywords = listOf("-("), keywordRegex = true), e))
+
+        // alone in AND and OR, and next to a hit positive: the refused negative is still fatal
+        for (mode in listOf("AND", "OR")) {
+            assertFalse("'-(' alone mode=$mode", AddonRules.matches(kw("-(", mode = mode, regex = true), e))
+            assertFalse("'-(' next to a hit mode=$mode",
+                AddonRules.matches(kw("کد", "-(", mode = mode, regex = true), ev(body = "کد 42")))
+            assertFalse("bare '-' + refused, usable positive first mode=$mode",
+                AddonRules.matches(kw("کد", "-", "-(", mode = mode, regex = true), ev(body = "کد 42")))
+            assertFalse("bare '-' + refused, usable positive last mode=$mode",
+                AddonRules.matches(kw("-(", "-", "کد", mode = mode, regex = true), ev(body = "کد 42")))
+        }
+
+        // non-regex sibling: a negative whose term normalizes away
+        rules(p.ctx, AddonRule(id = "hole", name = "hole", keywords = listOf("-\u200C"), action = "copy_body"))
+        assertFalse("negative ZWNJ term", AddonRules.matches(kw("-\u200C"), e))
+        assertTrue(AddonRules.matching(p.ctx, e, 0L).isEmpty())
+        assertFalse("negative ZWNJ next to a hit", AddonRules.matches(kw("کد", "-\u200C"), ev(body = "کد 42")))
+        assertFalse("negative ZWNJ next to a hit, OR", AddonRules.matches(kw("کد", "-\u200C", mode = "OR"), ev(body = "کد 42")))
+
+        // a bare "-" next to a usable term is dropped: same answer as the positive alone
+        for (mode in listOf("AND", "OR")) for (body in listOf("کد 42", "سلام")) {
+            assertEquals("bare '-' mode=$mode body=$body",
+                AddonRules.matches(kw("کد", mode = mode), ev(body = body)),
+                AddonRules.matches(kw("کد", "-", mode = mode), ev(body = body)))
+        }
+        assertTrue(AddonRules.matches(kw("کد", "-"), ev(body = "کد 42")))
+        assertFalse(AddonRules.matches(kw("کد", "-"), ev(body = "سلام")))
+
+        // control: the same unusable term as a POSITIVE is still fatal
+        assertFalse(AddonRules.matches(kw("(", regex = true), e))
+        assertFalse(AddonRules.matches(kw("\u200C"), e))
+    }
+
+    /** Test 7: cooldown, trace line and dry-run miss reason are unchanged for negated rules. */
+    @Test
+    fun s7TraceCooldownAndDryRunSeeNegationAsTheKeywordCondition() {
+        val p = ClipPrefs()
+        val r = AddonRule(id = "otp", name = "OtpOnly", keywords = listOf("کد", "-لغو"),
+            keywordMode = "AND", actions = listOf("copy_body"), cooldownSeconds = 600)
+        rules(p.ctx, r)
+
+        // negative hit: missReason names the keyword condition, nothing runs, no cooldown armed
+        val ad = evT("کد تخفیف، لغو 11")
+        assertEquals("keyword", AddonRules.missReason(r, ad, 0L))
+        assertTrue("dry-run would report the keyword miss", AddonRules.matching(p.ctx, ad, 0L).isEmpty())
+        AddonBus.dispatch(p.ctx, ad)
+        val missLine = decisions(p.prefs).single()
+        println("S7 miss line: $missLine")
+        assertTrue("trace line: $missLine", missLine.contains("no rule (keyword)"))
+        assertFalse("no cooldown from a miss", p.prefs.values.containsKey("addon_fired_otp"))
+
+        // clean body: matches, fires, arms the cooldown, trace names the rule
+        val clean = evT("کد تایید شما: 12345")
+        assertNull("dry-run says the rule matches", AddonRules.missReason(r, clean, 0L))
+        assertEquals("dry-run runs the action list", 1, AddonRules.executeAll(p.ctx, r, clean, dryRun = true))
+        assertFalse("dry-run did not arm", p.prefs.values.containsKey("addon_fired_otp"))
+        AddonBus.dispatch(p.ctx, clean)
+        val fireLine = decisions(p.prefs).first()
+        println("S7 fire line: $fireLine")
+        assertTrue("trace names the rule: $fireLine", fireLine.contains("OtpOnly") && fireLine.contains("copy_body"))
+        assertTrue("cooldown armed", p.prefs.values.containsKey("addon_fired_otp"))
+        assertFalse("and blocks the next SMS", AddonRules.allowedNow(p.ctx, r, System.currentTimeMillis()))
+
+        // zero-condition inertness untouched (S3 contract)
+        val q = prefs(null)
+        rules(q.ctx, AddonRule(id = "empty"), AddonRule(id = "any", matchAny = true))
+        assertEquals(listOf("any"), AddonRules.matching(q.ctx, ev(body = "x"), 0L).map { it.id })
+        assertEquals("no conditions", AddonRules.missReason(AddonRule(id = "empty"), ev(body = "x"), 0L))
+    }
+
+    /** Test 8: cost of negation is one normalize per term; 20 rules x 2 negatives on 200 chars. */
+    @Test
+    fun s7TwentyRulesWithTwoNegativesStayUnder100ms() {
+        val p = prefs(null)
+        val rules20 = (0 until 20).map { i ->
+            AddonRule(id = "n$i", priority = i, keywordMode = "AND",
+                keywords = listOf("کد", "-لغو$i", "-تخفیف$i"), action = "copy_body")
+        }
+        AddonRules.save(p.ctx, rules20)
+        val body = ("کد تایید شما 12345. این پیام برای اطلاع‌رسانی ارسال شده است. " + "x".repeat(80)).padEnd(200, '.')
+        assertEquals(200, body.length)
+        val e = ev(body = body)
+
+        repeat(50) { AddonRules.matching(p.ctx, e, 0L) }
+        val runs = 200
+        val t0 = System.nanoTime()
+        var matched = 0
+        repeat(runs) { matched = AddonRules.matching(p.ctx, e, 0L).size }
+        val avgMs = (System.nanoTime() - t0) / runs / 1_000_000.0
+        println("S7 cost: 20 rules x 2 negatives on ${body.length}-char body -> ${"%.3f".format(avgMs)}ms ($matched matched)")
+
+        assertEquals("all 20 rules match the clean body", 20, matched)
+        assertTrue("S7 FAIL: ${"%.2f".format(avgMs)}ms, budget 100ms", avgMs < 100.0)
+        // a body carrying every negative token matches none of them
+        val dirty = "کد " + (0 until 20).joinToString(" ") { "لغو$it" } + " " + (0 until 20).joinToString(" ") { "تخفیف$it" }
+        assertEquals("negatives veto every rule", emptyList<AddonRule>(), AddonRules.matching(p.ctx, ev(body = dirty), 0L))
+    }
 }

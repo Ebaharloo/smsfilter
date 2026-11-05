@@ -229,15 +229,25 @@ object AddonRules {
             // bridges ZWNJ and spaced-out evasion ("ت خ ف ی ف"). Empty kw would match everything.
             val body = Normalizer.normalize(event.body)
             val squashed = Normalizer.squash(body)
-            val hits = terms.map { term ->
-                if (term.isBlank()) false
-                else if (rule.keywordRegex) regexHit(term, body)
-                else {
-                    val kw = Normalizer.normalize(term)
-                    kw.isNotEmpty() && (body.contains(kw) || squashed.contains(Normalizer.squash(kw)))
-                }
+            fun hit(raw: String): Boolean = if (rule.keywordRegex) regexHit(raw, body) else {
+                val kw = Normalizer.normalize(raw)
+                kw.isNotEmpty() && (body.contains(kw) || squashed.contains(Normalizer.squash(kw)))
             }
-            active += "keyword" to if (rule.keywordMode.trim().equals("OR", ignoreCase = true)) hits.any { it } else hits.all { it }
+            // "-term" = must be absent; "\-term" = literal hyphen. A blank or bare-hyphen term is
+            // ignored beside a usable sibling; alone it leaves nothing usable, so the rule never matches.
+            val parsed = terms.map { keywordTerm(it) }
+            val negTerms = parsed.filter { it.first && it.second.isNotBlank() && it.second != "-" }.map { it.second }
+            val positives = parsed.filterNot { it.first }.map { it.second }
+            // A negative that can never hit ("-(" in regex mode, "-" + ZWNJ) would be vacuously satisfied
+            // and turn the rule into match-all, so it makes the rule unsatisfiable instead.
+            val negUsable = negTerms.all { t -> if (rule.keywordRegex) regexUsable(t) else Normalizer.normalize(t).isNotEmpty() }
+            val usable = parsed.any { it.second.isNotBlank() && !(it.first && it.second == "-") }
+            if (parsed.isNotEmpty() && (!usable || !negUsable)) active += "keyword" to false
+            else {
+                val posOk = positives.isEmpty() ||
+                    if (rule.keywordMode.trim().equals("OR", ignoreCase = true)) positives.any(::hit) else positives.all(::hit)
+                active += "keyword" to (posOk && negTerms.none(::hit))
+            }
         }
         if (rule.minLength > 0) active += "length" to (event.body.length >= rule.minLength)
         if (rule.maxLength > 0) active += "length" to (event.body.length <= rule.maxLength)
@@ -429,6 +439,14 @@ object AddonRules {
         } catch (t: Throwable) {
             Log.w("AddonRules", "toast failed", t)
         }
+    }
+
+    // "-term" is a negative (must be absent); "\-term" is a literal leading hyphen; the bare
+    // "-"/"--" leftovers are dropped by the caller, since they would match nothing usable.
+    fun keywordTerm(raw: String): Pair<Boolean, String> = when {
+        raw.startsWith("\\-") -> false to raw.substring(1)
+        raw.startsWith("-") -> true to raw.substring(1)
+        else -> false to raw
     }
 
     // Bound every user pattern: length, overlapping/nested quantifiers (catastrophic backtracking), subject size.

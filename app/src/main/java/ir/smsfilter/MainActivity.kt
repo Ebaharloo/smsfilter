@@ -1047,9 +1047,13 @@ private fun conditionSummary(rule: AddonRule): String {
     if (rule.senderContains.isNotBlank()) parts += "sender contains '${rule.senderContains}'"
     val terms = if (rule.keywords.isNotEmpty()) rule.keywords else listOf(rule.keywordContains).filter { it.isNotBlank() }
     if (terms.isNotEmpty()) {
-        val shown = terms.joinToString(", ") { if (rule.keywordRegex) "/$it/" else "'$it'" }
+        fun show(t: String) = (if (rule.keywordRegex) "/%s/" else "'%s'").format(AddonRules.keywordTerm(t).second)
+        val (not, yes) = terms.partition { AddonRules.keywordTerm(it).first }
         val mode = if (rule.keywordMode.equals("OR", ignoreCase = true)) "any" else "all"
-        parts += "message contains $mode of [$shown]"
+        parts += listOfNotNull(
+            if (yes.isEmpty()) null else "message contains $mode of [${yes.joinToString(", ") { show(it) }}]",
+            if (not.isEmpty()) null else "message does not contain [${not.joinToString(", ") { show(it) }}]"
+        ).joinToString(" AND ")
     }
     if (rule.onlyFromContacts) parts += "from contacts"
     if (rule.onlySpam) parts += "spam only"
@@ -1112,7 +1116,8 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
     val action = actions.firstOrNull() ?: rule.action
     // An unusable pattern (typed before the Regex chip was toggled, or imported from JSON) would
     // never fire at runtime, so the outer Save refuses it too, not just the keyword dialog.
-    val badRegex = if (keywordRegex) keywords.filter { it.isNotBlank() && !AddonRules.regexUsable(it) } else emptyList()
+    // Negation strips before compiling: "-^09\d{9}$" is judged as "^09\d{9}$".
+    val badRegex = if (keywordRegex) keywords.map { AddonRules.keywordTerm(it).second }.filter { it.isNotBlank() && !AddonRules.regexUsable(it) } else emptyList()
 
     fun openDialog(key: String, initial: String) {
         dialog = key
@@ -1131,7 +1136,7 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                     FilterChip(selected = sender.isNotBlank(), onClick = { openDialog("sender", sender) },
                         label = { Text(if (sender.isBlank()) "Sender contains…" else "Sender: $sender") })
                     FilterChip(selected = keywords.isNotEmpty(), onClick = { openDialog("keyword", keywords.joinToString(if (keywordRegex) "\n" else ", ")) },
-                        label = { Text(if (keywords.isEmpty()) "Message contains…" else "Message: ${keywords.joinToString(if (keywordRegex) " | " else ", ")}") })
+                        label = { Text(if (keywords.isEmpty()) "Message contains…" else "Message: ${keywords.joinToString(if (keywordRegex) " | " else ", ") { (if (AddonRules.keywordTerm(it).first) "not " else "") + AddonRules.keywordTerm(it).second }}") })
                     FilterChip(selected = keywordMode.equals("OR", ignoreCase = true),
                         onClick = { keywordMode = if (keywordMode.equals("OR", ignoreCase = true)) "AND" else "OR" },
                         label = { Text(if (keywordMode.equals("OR", ignoreCase = true)) "Any keyword" else "All keywords") })
@@ -1232,7 +1237,7 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
     if (dialog != null) {
         // Refused patterns would never match at runtime: show them and block save instead of going silent.
         val refused = if (dialog == "keyword" && keywordRegex)
-            dialogValue.split("\n").map { it.trim() }.filter { it.isNotEmpty() && !AddonRules.regexUsable(it) }
+            dialogValue.split("\n").map { it.trim() }.map { AddonRules.keywordTerm(it).second }.filter { it.isNotEmpty() && !AddonRules.regexUsable(it) }
         else emptyList()
         AlertDialog(
             onDismissRequest = { dialog = null },
@@ -1248,7 +1253,7 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                     OutlinedTextField(value = dialogValue, onValueChange = { dialogValue = it }, modifier = Modifier.fillMaxWidth(),
                         label = { Text(when (dialog) {
                             "sender" -> "Substring"
-                            "keyword" -> if (keywordRegex) "one regex per line" else "a, b, c"
+                            "keyword" -> (if (keywordRegex) "one regex per line" else "a, b, c") + ", leading - excludes"
                             "length" -> "min,max"
                             "time" -> "days|start|end"
                             else -> "Value"

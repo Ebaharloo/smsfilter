@@ -37,6 +37,10 @@ Out of scope: screen/DND/BT/geofence/foreground-app conditions, batch/summarize/
   - Tools: `rea` CLI at `~/.npm-global/bin/rea` (`rea --help`), plus MCP `mcp__rea__*` tools when available. JADX/apktool are NOT installed — no decompiling to disk.
   - Hard limit: static analysis only. No execution, no network.
 - Collaboration rule: a scout proposal enters the plan only after DEV confirms feasibility (<= 1 file, <= ~80 LOC, no new dependency, no core-filtering change). Otherwise it goes to `Parked` with the reason. SCOUT may not mark its own item as planned.
+- UX team (added Nov 5): drives the installed app on Waydroid and judges what JVM tests cannot — element placement, Persian labels and direction, tap flow, empty/error states, contrast and touch sizes. Reports with screenshots. Runs after each UI-touching step, on the build the test team just passed.
+  - `waydroid app install` silently fails when the versionCode is unchanged: bump before install.
+  - Capture with `QT_QPA_PLATFORM=wayland spectacle -b -n -f -o <png>`; Waydroid ADB is unauthorized and `waydroid shell` needs root, so there is no input automation — taps must be done by the user or via the desktop input tools.
+  - Verdict goes to `TEST-UX.md` with a screenshot per finding.
 
 Gate command (test team, every step):
 ```

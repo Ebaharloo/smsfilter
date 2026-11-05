@@ -288,6 +288,85 @@ class AddonRulesTest {
             AddonRules.matches(AddonRule(keywords = listOf(""), keywordMode = "OR", keywordRegex = true), event(body = "anything"))
         )
     }
+    // ---------- S7: "-term" negation ----------
+
+    @Test
+    fun negativeTermExcludesAdButKeepsTheOtp() {
+        val rule = AddonRule(keywords = listOf("کد", "-لغو"), keywordMode = "AND")
+        assertTrue("bank OTP body still matches", AddonRules.matches(rule, event(body = "کد تایید شما: 12345")))
+        assertFalse("ad body with لغو11 must not match", AddonRules.matches(rule, event(body = "لغو11 تخفیف ویژه")))
+    }
+
+    @Test
+    fun onlyNegativeTermsMatchACleanBody() {
+        val rule = AddonRule(keywords = listOf("-لغو"))
+        assertTrue(AddonRules.matches(rule, event(body = "کد تایید شما: 12345")))
+        assertFalse(AddonRules.matches(rule, event(body = "برای لغو عدد 11 را بفرستید")))
+    }
+
+    @Test
+    fun andModeWithTwoNegativesFailsOnEitherOne() {
+        val rule = AddonRule(keywords = listOf("کد", "-لغو", "-تخفیف"), keywordMode = "AND")
+        assertTrue(AddonRules.matches(rule, event(body = "کد تایید شما: 12345")))
+        assertFalse(AddonRules.matches(rule, event(body = "کد تایید، لغو 11")))
+        assertFalse(AddonRules.matches(rule, event(body = "کد تایید، تخفیف ویژه")))
+        assertFalse("positive missing still fails", AddonRules.matches(rule, event(body = "سلام")))
+    }
+
+    @Test
+    fun orModeStillExcludesEveryNegative() {
+        val rule = AddonRule(keywords = listOf("کد", "رمز", "-لغو"), keywordMode = "OR")
+        assertTrue(AddonRules.matches(rule, event(body = "رمز یکبار مصرف")))
+        assertFalse("a present negative kills the OR hit too", AddonRules.matches(rule, event(body = "رمز، لغو 11")))
+        assertFalse("no positive at all", AddonRules.matches(rule, event(body = "سلام")))
+    }
+
+    @Test
+    fun negativeSeesPersianVariantsAndSpacedEvasion() {
+        val rule = AddonRule(keywords = listOf("کد", "-لغو"))
+        assertFalse("ZWNJ form", AddonRules.matches(rule, event(body = "کد تایید، لغو\u200C11")))
+        assertFalse("spaced-out form", AddonRules.matches(rule, event(body = "کد تایید، ل غ و 11")))
+        assertFalse("Arabic kaf variant", AddonRules.matches(rule, event(body = "كد تاييد، لغو")))
+    }
+
+    @Test
+    fun negativeRegexMeansPatternMustBeAbsent() {
+        val rule = AddonRule(keywords = listOf("-^09\\d{9}$"), keywordRegex = true)
+        assertTrue("clean body matches", AddonRules.matches(rule, event(body = "hello")))
+        assertFalse("body that is exactly a mobile number is excluded", AddonRules.matches(rule, event(body = "09123456789")))
+        assertTrue(AddonRules.regexUsable(AddonRules.keywordTerm("-^09\\d{9}$").second))
+    }
+
+    @Test
+    fun escapedHyphenIsALiteralPositiveTerm() {
+        val rule = AddonRule(keywords = listOf("\\-abc"))
+        assertTrue(AddonRules.matches(rule, event(body = "promo -abc here")))
+        assertFalse("literal hyphen required", AddonRules.matches(rule, event(body = "promo abc here")))
+        assertFalse(AddonRules.keywordTerm("\\-abc").first)
+    }
+
+    @Test
+    fun unusableNegativeCannotTurnTheRuleIntoMatchAll() {
+        // A negative that can never hit would be vacuously satisfied; the rule must go dead instead.
+        assertFalse("refused regex negative", AddonRules.matches(
+            AddonRule(keywords = listOf("-("), keywordRegex = true), event(body = "anything")))
+        assertFalse("ZWNJ-only negative", AddonRules.matches(
+            AddonRule(keywords = listOf("-\u200C")), event(body = "anything")))
+        assertFalse("refused negative next to a good positive", AddonRules.matches(
+            AddonRule(keywords = listOf("کد", "-(("), keywordRegex = true), event(body = "کد 42")))
+        // A bare '-' next to a usable term is simply dropped, so the rule behaves like the positive alone.
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("کد", "-")), event(body = "کد 42")))
+    }
+
+    @Test
+    fun bareHyphenIsNoTermAndDoesNotWiden() {
+        assertFalse("only '-' leaves no condition", AddonRules.matches(AddonRule(keywords = listOf("-")), event(body = "anything")))
+        assertFalse("'--' is unusable too", AddonRules.matches(AddonRule(keywords = listOf("--")), event(body = "anything")))
+        val withSender = AddonRule(senderContains = "bank", keywords = listOf("-"))
+        assertFalse("a bare '-' is never a free pass, even with other conditions", AddonRules.matches(withSender, event(sender = "bank", body = "anything")))
+        assertFalse(AddonRules.matches(withSender, event(sender = "999", body = "anything")))
+    }
+
     // ---------- S2: bounded regex work ----------
 
     @Test
