@@ -128,6 +128,13 @@ S6 pass over `BUZZKILL-GAP.md`: 13 rows `done`, 4 `feasible now`, 19 `parked`. O
 
 Not promoted (see `BUZZKILL-GAP.md` for the reason on each): keyword tree, per-term `matchType`, multi-range schedules, `Room`/history, all device-state conditions, notification listener.
 
+### Round 2 additions (REA on the real DEX, 2 Nov)
+- **S11 emoji condition (~8 LOC).** BuzzKill `Extra.Emoji` is presence-only (code-point scan). Strongest cheap Persian ad signal; pairs with the existing link/promo logic.
+- **S12 phone-number-in-body (~12 LOC).** BuzzKill `Extra.PhoneNumber` = regex + digit count + date rejection. Lets a rule exclude "body is just a number".
+- Parked deliberately: schedule `invert` flag (no SMS use), every extra needing ML Kit or notification payload (Language, ImageLabel, Category, GroupConversation, Ongoing, Media, Chronometer, Profile, CustomLayout, Urgent). BuzzKill `RulePriority` is persisted and never read, so our `sortedBy{priority}` is our own semantics, not parity. BuzzKill cooldown is in-memory, keyed by notification comparison, MUTE or DISMISS only — ours is per-rule and persisted, keep.
+- Correction: BuzzKill's own word mode uses ASCII `\W`, so `رمز` matches inside `رمزنگاری` there too. Our `wholeWordHit` is stricter than BuzzKill; do not "fix" it back.
+
+
 ## Definition of done
 - `:app:testDebugUnitTest` green including new adversarial tests.
 - `scripts/gate.sh` green (filter power unchanged: recall 0.88 / kept 0.983 gate).
