@@ -3,12 +3,14 @@ package ir.smsfilter.addon
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.content.SharedPreferences
 import java.lang.reflect.Proxy
 
@@ -900,5 +902,279 @@ class AddonRulesTest {
         val best = (1..5).minOf { pass() } / 1_000_000
         println("S8 whole-word cost: 20 rules x ${body.length}-char body = ${best}ms (budget 100ms)")
         assertTrue("20 whole-word rules took ${best}ms, budget 100ms", best < 100)
+    }
+
+    // ---------- S9: nested condition tree ----------
+
+    private fun treeRule(c: Cond) = AddonRule(conditions = c)
+
+    private fun Tree(vararg items: Cond) = Cond.Group("AND", items = items.toList())
+
+    @Test
+    fun nestedOrAndNotGroup() {
+        // (otp OR رمز) AND NOT لغو
+        val rule = treeRule(
+            Tree(
+                Cond.Group("OR", items = listOf(Cond.Keyword("otp"), Cond.Keyword("رمز"))),
+                Cond.Group("AND", not = true, items = listOf(Cond.Keyword("لغو")))
+            )
+        )
+        assertTrue(AddonRules.matches(rule, event(body = "your otp code")))
+        assertTrue(AddonRules.matches(rule, event(body = "رمز شما")))
+        assertFalse("neither branch", AddonRules.matches(rule, event(body = "سلام")))
+        assertFalse("the NOT group excludes", AddonRules.matches(rule, event(body = "رمز شما، لغو 11")))
+    }
+
+    @Test
+    fun threeLevelsOfGroups() {
+        // (bank AND (otp OR کد)) OR واریز
+        val rule = treeRule(
+            Cond.Group(
+                "OR", items = listOf(
+                    Cond.Group(
+                        "AND", items = listOf(
+                            Cond.Sender("bank"),
+                            Cond.Group("OR", items = listOf(Cond.Keyword("otp"), Cond.Keyword("کد")))
+                        )
+                    ),
+                    Cond.Keyword("واریز")
+                )
+            )
+        )
+        assertTrue(AddonRules.matches(rule, event(sender = "bank", body = "کد 42")))
+        assertTrue(AddonRules.matches(rule, event(sender = "999", body = "واریز شد")))
+        assertFalse("right sender, no keyword", AddonRules.matches(rule, event(sender = "bank", body = "سلام")))
+        assertFalse("keyword on the wrong sender", AddonRules.matches(rule, event(sender = "999", body = "کد 42")))
+    }
+
+    @Test
+    fun notOnAGroupAndNotOnALeafAgree() {
+        val leafNot = treeRule(Tree(Cond.Keyword("کد"), Cond.Keyword("لغو", not = true)))
+        val groupNot = treeRule(
+            Tree(Cond.Keyword("کد"), Cond.Group("AND", not = true, items = listOf(Cond.Keyword("لغو"))))
+        )
+        val bodies = listOf("کد 42", "کد، لغو 11", "لغو 11", "سلام")
+        bodies.forEach { b ->
+            assertEquals("body=$b", AddonRules.matches(leafNot, event(body = b)), AddonRules.matches(groupNot, event(body = b)))
+        }
+        assertTrue(AddonRules.matches(leafNot, event(body = "کد 42")))
+        assertFalse(AddonRules.matches(leafNot, event(body = "کد، لغو 11")))
+    }
+
+    @Test
+    fun treeLeavesEvaluate() {
+        val base = event(body = "hi", fromContact = true, otp = "1234")
+        assertTrue(AddonRules.matches(treeRule(Cond.Contact()), base))
+        assertFalse(AddonRules.matches(treeRule(Cond.Contact()), base.copy(fromContact = false)))
+        assertTrue(AddonRules.matches(treeRule(Cond.Contact(not = true)), base.copy(fromContact = false)))
+        assertTrue(AddonRules.matches(treeRule(Cond.Spam(false)), base))
+        assertFalse(AddonRules.matches(treeRule(Cond.Spam(false)), base.copy(isSpam = true)))
+        assertTrue(AddonRules.matches(treeRule(Cond.Otp(true)), base))
+        assertFalse(AddonRules.matches(treeRule(Cond.Otp(true)), base.copy(otp = null)))
+        assertTrue(AddonRules.matches(treeRule(Cond.Emoji(true)), base.copy(body = "🔥 hello")))
+        assertFalse(AddonRules.matches(treeRule(Cond.Emoji(true)), base))
+        assertTrue(AddonRules.matches(treeRule(Cond.Emoji(false)), base))
+        assertTrue(AddonRules.matches(treeRule(Cond.Link(true)), base.copy(body = "see https://x.y")))
+        assertFalse(AddonRules.matches(treeRule(Cond.Link(true)), base))
+        assertTrue(AddonRules.matches(treeRule(Cond.Length(min = 2, max = 2)), base))
+        assertFalse(AddonRules.matches(treeRule(Cond.Length(min = 3)), base))
+        assertTrue(AddonRules.matches(treeRule(Cond.Time(days = setOf(java.util.Calendar.MONDAY), startHour = 9, endHour = 17)),
+            event(), ts(java.util.Calendar.MONDAY, 12)))
+        assertFalse(AddonRules.matches(treeRule(Cond.Time(days = setOf(java.util.Calendar.MONDAY), startHour = 9, endHour = 17)),
+            event(), ts(java.util.Calendar.MONDAY, 20)))
+        assertTrue("overnight window wraps", AddonRules.matches(treeRule(Cond.Time(startHour = 22, endHour = 6)),
+            event(), ts(java.util.Calendar.MONDAY, 3)))
+    }
+
+    @Test
+    fun keywordScopeAndMatchModes() {
+        val onSender = treeRule(Tree(Cond.Keyword("bank", scope = "sender")))
+        assertTrue(AddonRules.matches(onSender, event(sender = "bank sms", body = "hello")))
+        assertFalse("body is not the sender scope", AddonRules.matches(onSender, event(sender = "123", body = "bank otp")))
+        val any = treeRule(Tree(Cond.Keyword("bank", scope = "any")))
+        assertTrue(AddonRules.matches(any, event(sender = "bank", body = "hello")))
+        assertTrue(AddonRules.matches(any, event(sender = "123", body = "bank otp")))
+        assertFalse(AddonRules.matches(treeRule(Tree(Cond.Keyword("otp", match = "exact"))), event(body = "your otp")))
+        assertTrue(AddonRules.matches(treeRule(Tree(Cond.Keyword("otp", match = "exact"))), event(body = "otp")))
+        assertTrue(AddonRules.matches(treeRule(Tree(Cond.Sender("bank", "exact"))), event(sender = "bank")))
+        assertFalse(AddonRules.matches(treeRule(Tree(Cond.Sender("bank", "exact"))), event(sender = "bank2")))
+    }
+
+    @Test
+    fun treeKeepsTheNoWideningInvariants() {
+        val zwnj = "\u200C"
+        assertFalse(AddonRules.matches(treeRule(Cond.Keyword(zwnj)), event(body = "anything")))
+        assertFalse("NOT must not turn an unusable term into a free pass",
+            AddonRules.matches(treeRule(Cond.Keyword(zwnj, not = true)), event(body = "anything")))
+        assertFalse(AddonRules.matches(treeRule(Cond.Keyword("(", match = "regex")), event(body = "a(b")))
+        assertFalse(AddonRules.matches(treeRule(Cond.Keyword("(", match = "regex", not = true)), event(body = "a(b")))
+        assertFalse("pattern over the 120-char cap", AddonRules.matches(
+            treeRule(Cond.Keyword("a".repeat(121), match = "regex")), event(body = "a".repeat(121))))
+        assertTrue(AddonRules.matches(treeRule(Cond.Keyword("a".repeat(120), match = "regex")), event(body = "a".repeat(120))))
+        assertFalse("unusable sender term", AddonRules.matches(treeRule(Cond.Sender(zwnj)), event(sender = "bank")))
+        // whole-word uses isLetterOrDigit boundaries, not Java's ASCII \W
+        assertFalse(AddonRules.matches(treeRule(Cond.Keyword("رمز", match = "word")), event(body = "رمزنگاری")))
+        assertTrue(AddonRules.matches(treeRule(Cond.Keyword("رمز", match = "word")), event(body = "رمز شما")))
+        assertFalse("an unusable OR branch cannot widen the group", AddonRules.matches(
+            treeRule(Cond.Group("OR", items = listOf(Cond.Keyword(zwnj), Cond.Keyword("otp")))), event(body = "hello")))
+    }
+
+    @Test
+    fun legacyFlatRulesMatchThroughTheMigratedTree() {
+        val cases = listOf(
+            AddonRule(senderContains = "bank", keywords = listOf("کد", "رمز", "-لغو"), keywordMode = "OR"),
+            AddonRule(keywords = listOf("وام"), keywordWholeWord = true, minLength = 5, maxLength = 40),
+            AddonRule(daysOfWeek = "2", startHour = 9, endHour = 17, onlyNotSpam = true, otpRequired = false)
+        )
+        val events = listOf(
+            event(sender = "bank", body = "کد تایید 1234", otp = "1234"),
+            event(sender = "bank", body = "رمز، لغو 11"),
+            event(body = "وام 500 میلیون"),
+            event(body = "دوام"),
+            event(body = "x", isSpam = true),
+            event(body = "سلام", otp = null)
+        )
+        val times = listOf(ts(java.util.Calendar.MONDAY, 12), ts(java.util.Calendar.MONDAY, 20))
+        cases.forEach { flat ->
+            val migrated = AddonRule(conditions = AddonRules.toTree(flat))
+            events.forEach { e ->
+                times.forEach { t ->
+                    assertEquals("flat=$flat body=${e.body}", AddonRules.matches(flat, e, t), AddonRules.matches(migrated, e, t))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun conditionsAndActionListRoundTrip() {
+        val p = FakePrefs()
+        val tree = Tree(
+            Cond.Sender("bank"),
+            Cond.Group("OR", items = listOf(Cond.Keyword("کد"), Cond.Keyword("رمز", match = "word", scope = "any")))
+        )
+        val acts = listOf(
+            Act("forward", mapOf("number" to "0912")),
+            Act("open_app", mapOf("package" to "com.telegram.messenger"))
+        )
+        AddonRules.save(p.ctx, listOf(AddonRule(id = "t", conditions = tree, actionList = acts)))
+        val back = AddonRules.load(p.ctx).single()
+        assertEquals(tree, back.conditions)
+        assertEquals(acts, back.actionList)
+        assertEquals(listOf("forward", "open_app"), AddonRules.actsOf(back).map { it.type })
+        assertTrue("the tree is what matches, not the projected flat fields", AddonRules.matches(back, event(sender = "bank", body = "رمز شما")))
+    }
+
+    // ---------- S10: tree caps ----------
+
+    @Test
+    fun treeCapsMakeTheRuleUnusableNeverMatchAll() {
+        val wide = Cond.Group("AND", items = (1..100).map { Cond.Keyword("k$it") })
+        assertNotNull(AddonRules.treeProblem(wide))
+        assertFalse(AddonRules.matches(treeRule(wide), event(body = "k1")))
+        var deep: Cond = Cond.Keyword("otp")
+        repeat(8) { deep = Cond.Group("AND", items = listOf(deep)) }
+        assertNotNull(AddonRules.treeProblem(deep))
+        assertFalse(AddonRules.matches(treeRule(deep), event(body = "otp")))
+        // just under the ceiling still works
+        val ok = Cond.Group("AND", items = (1..60).map { Cond.Keyword("otp") })
+        assertNull(AddonRules.treeProblem(ok))
+        assertTrue(AddonRules.matches(treeRule(ok), event(body = "your otp")))
+    }
+
+    @Test
+    fun hundredNodeImportedJsonIsUnusable() {
+        val items = (1..100).joinToString(",") { """{"type":"keyword","text":"k$it"}""" }
+        val p = FakePrefs()
+        p.values["addon_rules_json"] = """[{"id":"big","conditions":{"type":"group","op":"AND","items":[$items]}}]"""
+        val r = AddonRules.load(p.ctx).single()
+        assertNotNull("the imported tree must be parsed, then flagged", r.conditions)
+        assertFalse(AddonRules.matches(r, event(body = "k1")))
+        assertTrue(AddonRules.matching(p.ctx, event(body = "k1"), 0L).isEmpty())
+    }
+
+    @Test
+    fun unreadableConditionsJsonIsDeadNotMatchAll() {
+        val p = FakePrefs()
+        p.values["addon_rules_json"] = """[{"id":"bad","conditions":{"type":"no_such_node","text":"x"}}]"""
+        val r = AddonRules.load(p.ctx).single()
+        assertFalse(AddonRules.matches(r, event(body = "anything")))
+        assertTrue(AddonRules.matching(p.ctx, event(body = "anything"), 0L).isEmpty())
+    }
+
+    // ---------- S11: per-action params, open_app / call / share ----------
+
+    private fun withLaunch(fake: (Context, Intent) -> Boolean, block: () -> Unit) {
+        val real = AddonRules.launch
+        try {
+            AddonRules.launch = fake
+            block()
+        } finally {
+            AddonRules.launch = real
+        }
+    }
+
+    @Test
+    fun launchesReportFalseWhenTheTargetIsMissing() {
+        val p = FakeClipPrefs()
+        withLaunch({ _, _ -> false }) {
+            assertFalse(AddonRules.executeAction(p.ctx, Act("open_app", mapOf("package" to "com.nope")), event()))
+            assertFalse(AddonRules.executeAction(p.ctx, Act("call", mapOf("number" to "0912")), event()))
+            assertFalse("chooser with no share app", AddonRules.executeAction(p.ctx, Act("share"), event()))
+            assertFalse("blank package is guarded before launch", AddonRules.executeAction(p.ctx, Act("open_app"), event()))
+            assertFalse("no number and no sender", AddonRules.executeAction(p.ctx, Act("call"), event(sender = " ")))
+        }
+    }
+
+    @Test
+    fun launchesReportTrueWhenTheyResolve() {
+        // shortcut: android.jar's Intent is a stub, so action/extras are unreadable on the JVM; what is
+        // verified here is the success path and that exactly one intent per action reaches the seam.
+        // Upgrade to Robolectric when the payload itself must be asserted.
+        val p = FakeClipPrefs()
+        val seen = mutableListOf<Intent>()
+        withLaunch({ _, i -> seen += i; true }) {
+            assertTrue(AddonRules.executeAction(p.ctx, Act("open_app", mapOf("package" to "com.telegram.messenger")), event(body = "hello")))
+            assertTrue("empty number falls back to the sender", AddonRules.executeAction(p.ctx, Act("call"), event(sender = "09121234567")))
+            assertTrue(AddonRules.executeAction(p.ctx, Act("call", mapOf("number" to "021")), event(sender = "0912")))
+            assertTrue(AddonRules.executeAction(p.ctx, Act("share", mapOf("package" to "com.whatsapp")), event(body = "body")))
+            assertEquals(4, seen.size)
+        }
+    }
+
+    @Test
+    fun twoForwardsUseTheirOwnNumbers() {
+        val p = FakeClipPrefs()
+        val sent = mutableListOf<Pair<String, String>>()
+        val real = AddonRules.send
+        try {
+            AddonRules.send = { _, to, text -> sent += to to text; true }
+            val rule = AddonRule(
+                id = "f",
+                actionList = listOf(
+                    Act("forward", mapOf("number" to "111")),
+                    Act("forward", mapOf("number" to "222")),
+                    Act("autoreply", mapOf("text" to "hi"))
+                )
+            )
+            assertEquals(3, AddonRules.executeAll(p.ctx, rule, event(sender = "123", fromContact = true, body = "hello")))
+            assertEquals(listOf("111", "222", "123"), sent.map { it.first })
+            assertEquals(listOf("hello", "hello", "hi"), sent.map { it.second })
+        } finally {
+            AddonRules.send = real
+        }
+    }
+
+    @Test
+    fun failedLaunchDoesNotArmTheCooldown() {
+        val p = FakeClipPrefs()
+        val rule = AddonRule(
+            id = "app",
+            keywordContains = "کد",
+            cooldownSeconds = 60,
+            actionList = listOf(Act("open_app", mapOf("package" to "com.nope")))
+        )
+        AddonRules.save(p.ctx, listOf(rule))
+        withLaunch({ _, _ -> false }) { AddonBus.dispatch(p.ctx, event(body = "کد 42")) }
+        assertFalse("a failed launch did nothing, so it must not start the cooldown", p.prefs.values.containsKey("addon_fired_app"))
     }
 }
