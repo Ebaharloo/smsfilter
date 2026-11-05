@@ -27,6 +27,9 @@ data class AddonRule(
     val keywords: List<String> = emptyList(),
     val keywordMode: String = "AND",
     val keywordRegex: Boolean = false,
+    // Plain keywords only: the term must sit between non-word chars / string edges. Regex mode
+    // ignores it, because the pattern carries its own boundaries.
+    val keywordWholeWord: Boolean = false,
     val minLength: Int = 0,
     val maxLength: Int = 0,
     val daysOfWeek: String = "",
@@ -86,6 +89,7 @@ object AddonRules {
                     },
                     keywordMode = o.optString("keywordMode", "AND"),
                     keywordRegex = o.optBoolean("keywordRegex", false),
+                    keywordWholeWord = o.optBoolean("keywordWholeWord", false),
                     minLength = o.optInt("minLength", 0),
                     maxLength = o.optInt("maxLength", 0),
                     daysOfWeek = o.optString("daysOfWeek", ""),
@@ -129,6 +133,7 @@ object AddonRules {
             o.put("keywords", JSONArray(r.keywords))
             o.put("keywordMode", r.keywordMode)
             o.put("keywordRegex", r.keywordRegex)
+            o.put("keywordWholeWord", r.keywordWholeWord)
             o.put("minLength", r.minLength)
             o.put("maxLength", r.maxLength)
             o.put("daysOfWeek", r.daysOfWeek)
@@ -229,9 +234,15 @@ object AddonRules {
             // bridges ZWNJ and spaced-out evasion ("ت خ ف ی ف"). Empty kw would match everything.
             val body = Normalizer.normalize(event.body)
             val squashed = Normalizer.squash(body)
+            // Word mode reads `body`, never `squashed`: squash deletes the spaces/punctuation the
+            // boundary test needs, so it would silently degrade whole-word back to a substring hit.
             fun hit(raw: String): Boolean = if (rule.keywordRegex) regexHit(raw, body) else {
                 val kw = Normalizer.normalize(raw)
-                kw.isNotEmpty() && (body.contains(kw) || squashed.contains(Normalizer.squash(kw)))
+                when {
+                    kw.isEmpty() -> false
+                    rule.keywordWholeWord -> wholeWordHit(body, kw)
+                    else -> body.contains(kw) || squashed.contains(Normalizer.squash(kw))
+                }
             }
             // "-term" = must be absent; "\-term" = literal hyphen. A blank or bare-hyphen term is
             // ignored beside a usable sibling; alone it leaves nothing usable, so the rule never matches.
@@ -273,6 +284,22 @@ object AddonRules {
 
         return active
     }
+
+    // Java's \w and \b are ASCII-only, so "(\\W|^)رمز(\\W|$)" matches inside "رمزنگاری": every
+    // Persian letter looks like a boundary. isLetterOrDigit is Unicode-aware, no flag needed.
+    private fun wholeWordHit(body: String, keyword: String): Boolean {
+        var i = body.indexOf(keyword)
+        while (i >= 0) {
+            val end = i + keyword.length
+            val left = i == 0 || !isWordChar(body[i - 1])
+            val right = end == body.length || !isWordChar(body[end])
+            if (left && right) return true
+            i = body.indexOf(keyword, i + 1)
+        }
+        return false
+    }
+
+    private fun isWordChar(c: Char) = c.isLetterOrDigit() || c == '_'
 
     private fun firedKey(rule: AddonRule) = "addon_fired_${rule.id}"
 

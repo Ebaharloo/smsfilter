@@ -1050,8 +1050,9 @@ private fun conditionSummary(rule: AddonRule): String {
         fun show(t: String) = (if (rule.keywordRegex) "/%s/" else "'%s'").format(AddonRules.keywordTerm(t).second)
         val (not, yes) = terms.partition { AddonRules.keywordTerm(it).first }
         val mode = if (rule.keywordMode.equals("OR", ignoreCase = true)) "any" else "all"
+        val words = if (rule.keywordWholeWord && !rule.keywordRegex) " (whole words)" else ""
         parts += listOfNotNull(
-            if (yes.isEmpty()) null else "message contains $mode of [${yes.joinToString(", ") { show(it) }}]",
+            if (yes.isEmpty()) null else "message contains $mode of [${yes.joinToString(", ") { show(it) }}]$words",
             if (not.isEmpty()) null else "message does not contain [${not.joinToString(", ") { show(it) }}]"
         ).joinToString(" AND ")
     }
@@ -1084,6 +1085,7 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
     }
     var keywordMode by remember { mutableStateOf(rule.keywordMode) }
     var keywordRegex by remember { mutableStateOf(rule.keywordRegex) }
+    var keywordWholeWord by remember { mutableStateOf(rule.keywordWholeWord) }
     var contactsOnly by remember { mutableStateOf(rule.onlyFromContacts) }
     var spamOnly by remember { mutableStateOf(rule.onlySpam) }
     var notSpamOnly by remember { mutableStateOf(rule.onlyNotSpam) }
@@ -1142,6 +1144,10 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                         label = { Text(if (keywordMode.equals("OR", ignoreCase = true)) "Any keyword" else "All keywords") })
                     FilterChip(selected = keywordRegex, onClick = { keywordRegex = !keywordRegex },
                         label = { Text("Regex") })
+                    // Plain keywords only: a regex owns its own boundaries, so the chip is off-limits then.
+                    FilterChip(selected = keywordWholeWord && !keywordRegex, enabled = !keywordRegex,
+                        onClick = { keywordWholeWord = !keywordWholeWord },
+                        label = { Text("Whole words") })
                     FilterChip(selected = contactsOnly, onClick = { contactsOnly = !contactsOnly },
                         label = { Text("From contacts") })
                     FilterChip(selected = spamOnly, onClick = { spamOnly = !spamOnly; if (spamOnly) notSpamOnly = false },
@@ -1209,6 +1215,7 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                     keywords = keywords,
                     keywordMode = keywordMode,
                     keywordRegex = keywordRegex,
+                    keywordWholeWord = keywordWholeWord,
                     minLength = minLength.toIntOrNull() ?: 0,
                     maxLength = maxLength.toIntOrNull() ?: 0,
                     daysOfWeek = days.trim(),

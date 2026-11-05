@@ -807,4 +807,98 @@ class AddonRulesTest {
             AddonRules.send = real
         }
     }
+
+    // ---------- S8: whole-word keywords, Persian-aware boundaries ----------
+
+    private fun wordRule(vararg terms: String) =
+        AddonRule(keywords = terms.toList(), keywordWholeWord = true)
+
+    @Test
+    fun wholeWordRejectsWordInteriorMatches() {
+        val rule = wordRule("وام")
+        assertTrue(AddonRules.matches(rule, event(body = "وام ۵۰۰ میلیون")))
+        assertFalse("prefix of a longer word", AddonRules.matches(rule, event(body = "دوام")))
+        assertFalse("suffix of a longer word", AddonRules.matches(rule, event(body = "وامدار")))
+        // The naive (\\W|^)kw(\\W|$) wrap fails exactly here: Java's \\W treats Persian letters as
+        // non-word, so it would report a boundary inside رمزنگاری.
+        assertFalse("ASCII \\W would have matched inside رمزنگاری",
+            AddonRules.matches(wordRule("رمز"), event(body = "رمزنگاری")))
+    }
+
+    @Test
+    fun wholeWordOffKeepsLegacySubstringMatching() {
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("وام")), event(body = "دوام")))
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = "وام"), event(body = "دوام")))
+    }
+
+    @Test
+    fun wholeWordPunctuationEdgesAndEmptyBody() {
+        val rule = wordRule("وام")
+        listOf("(وام)", "وام.", "وام،", "وام", "وام ۵۰۰", "وام\n۵۰۰").forEach {
+            assertTrue("must match <$it>", AddonRules.matches(rule, event(body = it)))
+        }
+        assertFalse("empty body has no boundaries to match", AddonRules.matches(rule, event(body = "")))
+        assertFalse(AddonRules.matches(rule, event(body = "وامدار ۵۰۰")))
+    }
+
+    @Test
+    fun wholeWordFoldsVariantsBeforeTheBoundaryTest() {
+        assertTrue("Arabic kaf folds", AddonRules.matches(wordRule("كارت"), event(body = "کارت به کارت")))
+        assertTrue("Arabic yeh folds", AddonRules.matches(wordRule("ايران"), event(body = "ایران خودرو")))
+        assertTrue("Persian digits fold", AddonRules.matches(wordRule("وام ۵۰۰"), event(body = "وام 500 میلیون")))
+        // Digits are word characters: an attached number is not a boundary (a probe worth arguing about).
+        assertFalse(AddonRules.matches(wordRule("وام"), event(body = "وام500 میلیون")))
+    }
+
+    @Test
+    fun wholeWordZwnjAndSpacedVariants() {
+        // normalize() rewrites ZWNJ to a space on both sides, so the two spellings are one term here.
+        assertTrue("ZWNJ keyword vs spaced body",
+            AddonRules.matches(wordRule("نیم\u200Cفاصله"), event(body = "نیم فاصله")))
+        assertTrue("spaced keyword vs ZWNJ body",
+            AddonRules.matches(wordRule("نیم فاصله"), event(body = "نیم\u200Cفاصله")))
+        // Same rewrite, unwanted side: a ZWNJ compound reads as two words and matches.
+        assertTrue("known hole: ZWNJ compound reads as two words",
+            AddonRules.matches(wordRule("وام"), event(body = "وام\u200Cدار")))
+    }
+
+    @Test
+    fun wholeWordNegativeOnlyExcludesWholeWords() {
+        val rule = AddonRule(keywords = listOf("کد", "-وام"), keywordWholeWord = true)
+        assertTrue("وام inside دوام is not the excluded word", AddonRules.matches(rule, event(body = "کد دوام")))
+        assertTrue("وامدار is a different word", AddonRules.matches(rule, event(body = "کد وامدار")))
+        assertFalse("a standalone وام is excluded", AddonRules.matches(rule, event(body = "کد وام")))
+    }
+
+    @Test
+    fun regexModeIgnoresTheWholeWordFlag() {
+        val rule = AddonRule(keywords = listOf("وام"), keywordRegex = true, keywordWholeWord = true)
+        assertTrue("the pattern owns its boundaries; nothing is wrapped around it",
+            AddonRules.matches(rule, event(body = "دوام")))
+    }
+
+    @Test
+    fun wholeWordFlagSurvivesSaveAndLoad() {
+        val p = FakePrefs()
+        AddonRules.save(p.ctx, listOf(AddonRule(name = "w", keywords = listOf("وام"), keywordWholeWord = true)))
+        assertTrue("whole-word must persist", AddonRules.load(p.ctx).single().keywordWholeWord)
+        assertFalse("default stays off", AddonRule().keywordWholeWord)
+    }
+
+    @Test
+    fun twentyWholeWordRulesOn200CharsStayCheap() {
+        val words = listOf("وام", "کد", "بانک", "مبلغ", "تخفیف", "کارت", "حساب", "شماره", "پرداخت", "برداشت",
+            "موجودی", "قسط", "سود", "اعتبار", "خرید", "فروش", "تایید", "لغو", "رمز", "قسط2")
+        val rules = words.map { AddonRule(keywords = listOf(it), keywordWholeWord = true) }
+        val body = ("وام 500 میلیون تومان؛ " + "لورم ایپسوم متن ساختگی برای سنجش ".repeat(10)).take(200)
+        fun pass(): Long {
+            val t0 = System.nanoTime()
+            rules.forEach { AddonRules.matches(it, event(body = body)) }
+            return System.nanoTime() - t0
+        }
+        repeat(50) { pass() } // JIT warmup: a cold run costs ~10x
+        val best = (1..5).minOf { pass() } / 1_000_000
+        println("S8 whole-word cost: 20 rules x ${body.length}-char body = ${best}ms (budget 100ms)")
+        assertTrue("20 whole-word rules took ${best}ms, budget 100ms", best < 100)
+    }
 }
