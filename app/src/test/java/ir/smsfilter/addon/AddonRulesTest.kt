@@ -1177,4 +1177,58 @@ class AddonRulesTest {
         withLaunch({ _, _ -> false }) { AddonBus.dispatch(p.ctx, event(body = "کد 42")) }
         assertFalse("a failed launch did nothing, so it must not start the cooldown", p.prefs.values.containsKey("addon_fired_app"))
     }
+
+    // ---------- the editor's sentence, and the ceilings it must respect ----------
+
+    @Test
+    fun summarizeReadsLikeASentence() {
+        val tree = Tree(
+            Cond.Sender("Bank", "exact"),
+            Cond.Group("OR", items = listOf(Cond.Keyword("کد"), Cond.Keyword("رمز"))),
+            Cond.Keyword("لغو", not = true)
+        )
+        assertEquals(
+            "sender is 'Bank' AND (keyword 'کد' OR keyword 'رمز') AND NOT 'لغو'",
+            AddonRules.summarize(tree)
+        )
+    }
+
+    @Test
+    fun legacyRuleSummarizesAsItsMigratedTree() {
+        val legacy = AddonRule(senderContains = "Bank", keywords = listOf("کد", "رمز", "-لغو"), keywordMode = "OR")
+        assertEquals(
+            "sender contains 'Bank' AND (keyword 'کد' OR keyword 'رمز') AND NOT 'لغو'",
+            AddonRules.summarize(AddonRules.toTree(legacy))
+        )
+    }
+
+    @Test
+    fun groupNegationAndEmptyGroupsReadCorrectly() {
+        val tree = Tree(Cond.Group("AND", not = true, items = listOf(Cond.Keyword("a"), Cond.Length(min = 5))))
+        assertEquals("NOT (keyword 'a' AND length >= 5)", AddonRules.summarize(tree))
+        assertEquals("any SMS", AddonRules.summarize(Cond.Group()))
+        assertEquals("never", AddonRules.summarize(Cond.Group("OR")))
+    }
+
+    @Test
+    fun actionSummaryCarriesPerActionParams() {
+        val acts = listOf(
+            Act("forward", mapOf("number" to "0912")),
+            Act("open_app", mapOf("package" to "org.telegram.messenger")),
+            Act("call")
+        )
+        val labels = mapOf("org.telegram.messenger" to "Telegram")
+        assertEquals(
+            "forward 0912, open Telegram, call sender",
+            acts.joinToString(", ") { AddonRules.summarizeAct(it) { p -> labels[p] ?: p } }
+        )
+    }
+
+    @Test
+    fun editorCeilingsCountWhatTheMatcherCounts() {
+        val tree = Tree(Cond.Group(items = listOf(Cond.Keyword("a"), Cond.Contact())))
+        assertEquals(4, AddonRules.nodeCount(tree))
+        assertEquals(2, AddonRules.leafCount(tree))
+        assertNull(AddonRules.treeProblem(tree))
+    }
 }

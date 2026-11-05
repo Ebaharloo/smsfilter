@@ -67,27 +67,30 @@ data class AddonRule(
  * `Group(op = "BROKEN")` is the sentinel for unreadable JSON: it evaluates false, never true.
  */
 sealed class Cond {
-    data class Group(val op: String = "AND", val not: Boolean = false, val items: List<Cond> = emptyList()) : Cond()
-    data class Sender(val value: String = "", val mode: String = "contains", val not: Boolean = false) : Cond()
+    // Every node carries it, so the editor and the JSON writer do not each need a when over the leaves.
+    abstract val not: Boolean
+
+    data class Group(val op: String = "AND", override val not: Boolean = false, val items: List<Cond> = emptyList()) : Cond()
+    data class Sender(val value: String = "", val mode: String = "contains", override val not: Boolean = false) : Cond()
     data class Keyword(
         val text: String = "",
         // contains | word | exact | regex. `sender`/`any` reuse the same normalization as the body.
         val match: String = "contains",
         val scope: String = "body",
-        val not: Boolean = false
+        override val not: Boolean = false
     ) : Cond()
-    data class Length(val min: Int = 0, val max: Int = 0, val not: Boolean = false) : Cond()
+    data class Length(val min: Int = 0, val max: Int = 0, override val not: Boolean = false) : Cond()
     data class Time(
         val days: Set<Int> = emptySet(),
         val startHour: Int = -1,
         val endHour: Int = -1,
-        val not: Boolean = false
+        override val not: Boolean = false
     ) : Cond()
-    data class Contact(val not: Boolean = false) : Cond()
-    data class Spam(val isSpam: Boolean = true, val not: Boolean = false) : Cond()
-    data class Otp(val required: Boolean = true, val not: Boolean = false) : Cond()
-    data class Emoji(val present: Boolean = true, val not: Boolean = false) : Cond()
-    data class Link(val present: Boolean = true, val not: Boolean = false) : Cond()
+    data class Contact(override val not: Boolean = false) : Cond()
+    data class Spam(val isSpam: Boolean = true, override val not: Boolean = false) : Cond()
+    data class Otp(val required: Boolean = true, override val not: Boolean = false) : Cond()
+    data class Emoji(val present: Boolean = true, override val not: Boolean = false) : Cond()
+    data class Link(val present: Boolean = true, override val not: Boolean = false) : Cond()
 }
 
 /** One action plus its own parameters, so two `forward`s can go to two numbers. */
@@ -512,24 +515,94 @@ object AddonRules {
         return Cond.Group("AND", items = items)
     }
 
+    // ---------- display: the rule as a sentence ----------
+
+    // The rule list and the editor subtitle both read this, so the card cannot describe a rule
+    // differently from the way the tree actually nests. `nested` is what puts parentheses in.
+    fun summarize(c: Cond, nested: Boolean = false): String = when (c) {
+        is Cond.Group -> {
+            val body = when {
+                c.op.equals("AND", true) -> c.items.joinToString(" AND ") { summarize(it, true) }.ifEmpty { "any SMS" }
+                c.op.equals("OR", true) -> c.items.joinToString(" OR ") { summarize(it, true) }.ifEmpty { "never" }
+                else -> "never" // BROKEN or unknown op
+            }
+            val text = if (nested && c.items.size > 1) "($body)" else body
+            negate(text, c.not)
+        }
+        is Cond.Sender -> negate(if (c.mode.equals("exact", true)) {
+            "sender is '${c.value}'"
+        } else "sender contains '${c.value}'", c.not)
+        is Cond.Keyword -> {
+            val q = if (c.match.equals("regex", true)) "/${c.text}/" else "'${c.text}'"
+            val qual = listOfNotNull(
+                if (c.match.equals("word", true)) "word" else null,
+                if (c.match.equals("exact", true)) "exact" else null,
+                when (c.scope.lowercase()) {
+                    "sender" -> "in sender"
+                    "any" -> "anywhere"
+                    else -> null
+                }
+            ).joinToString(", ")
+            val tail = if (qual.isEmpty()) "" else " ($qual)"
+            // "NOT 'لغو'" reads better than a negated phrase; the positive form keeps its keyword word.
+            if (c.not) "NOT $q$tail" else "keyword $q$tail"
+        }
+        is Cond.Length -> negate(when {
+            c.min > 0 && c.max > 0 -> "length ${c.min}-${c.max}"
+            c.min > 0 -> "length >= ${c.min}"
+            c.max > 0 -> "length <= ${c.max}"
+            else -> "length any"
+        }, c.not)
+        is Cond.Time -> {
+            val days = c.days.sorted().mapNotNull { DAY_NAMES.getOrNull(it - 1) }.joinToString(",")
+            val hours = if (c.startHour >= 0 && c.endHour >= 0) "${c.startHour}-${c.endHour}" else ""
+            negate("time " + listOf(days, hours).filter { it.isNotEmpty() }.joinToString(" ").trim(), c.not)
+        }
+        is Cond.Contact -> negate("from contacts", c.not)
+        is Cond.Spam -> negate(if (c.isSpam) "spam" else "not spam", c.not)
+        is Cond.Otp -> negate(if (c.required) "has OTP" else "no OTP", c.not)
+        is Cond.Emoji -> negate(if (c.present) "has emoji" else "no emoji", c.not)
+        is Cond.Link -> negate(if (c.present) "has link" else "no link", c.not)
+    }
+
+    // Calendar.DAY_OF_WEEK numbering: 1 = Sunday … 7 = Saturday, the order `days` stores.
+    private val DAY_NAMES = arrayOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+
+    private fun negate(text: String, not: Boolean): String = when {
+        !not -> text
+        // A nested group already carries its own parentheses.
+        text.startsWith("(") -> "NOT $text"
+        text.any { it.isWhitespace() } -> "NOT ($text)"
+        else -> "NOT $text"
+    }
+
+    // `appName` resolves a package to its label; the UI passes PackageManager, tests pass nothing.
+    fun summarizeAct(a: Act, appName: (String) -> String = { it }): String {
+        fun p(key: String) = a.params[key].orEmpty().trim()
+        return when (a.type) {
+            "email" -> "email ${p("to").ifBlank { "?" }}"
+            "forward" -> "forward ${p("number").ifBlank { "?" }}"
+            "open_app" -> "open ${appName(p("package").ifBlank { "?" })}"
+            "call" -> "call ${p("number").ifBlank { "sender" }}"
+            "share" -> "share ${p("package").ifBlank { "chooser" }.let(appName)}"
+            "autoreply" -> "auto-reply"
+            "modify_text" -> "modify text"
+            else -> a.type.replace('_', ' ')
+        }
+    }
+
+    // The editor's own ceilings: same numbers the matcher enforces, so it cannot build a dead rule.
+    fun nodeCount(c: Cond): Int = 1 + if (c is Cond.Group) c.items.sumOf { nodeCount(it) } else 0
+
+    fun leafCount(c: Cond): Int = if (c is Cond.Group) c.items.sumOf { leafCount(it) } else 1
+
     // ---------- condition tree JSON ----------
 
     private fun leaves(c: Cond): Sequence<Cond> =
         if (c is Cond.Group) c.items.asSequence().flatMap { leaves(it) } else sequenceOf(c)
 
     private fun condJson(c: Cond): JSONObject = JSONObject().apply {
-        put("not", when (c) {
-            is Cond.Group -> c.not
-            is Cond.Sender -> c.not
-            is Cond.Keyword -> c.not
-            is Cond.Length -> c.not
-            is Cond.Time -> c.not
-            is Cond.Contact -> c.not
-            is Cond.Spam -> c.not
-            is Cond.Otp -> c.not
-            is Cond.Emoji -> c.not
-            is Cond.Link -> c.not
-        })
+        put("not", c.not)
         when (c) {
             is Cond.Group -> {
                 put("type", "group")
