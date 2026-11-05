@@ -27,12 +27,16 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -71,8 +75,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
@@ -942,25 +948,51 @@ fun FeaturesPage() {
     var editing by remember { mutableStateOf<AddonRule?>(null) }
     var showEditor by remember { mutableStateOf(false) }
     var testing by remember { mutableStateOf<AddonRule?>(null) }
+    var deleting by remember { mutableStateOf<AddonRule?>(null) }
     var showDecisions by remember { mutableStateOf(false) }
     var decisions by remember { mutableStateOf(emptyList<String>()) }
     fun persist() { AddonRules.save(ctx, rules) }
+    fun addRule() {
+        // max+1, not size: after a delete a size-based priority can tie with a live rule.
+        editing = AddonRule(name = "New rule", priority = (rules.maxOfOrNull { it.priority } ?: -1) + 1)
+        showEditor = true
+    }
+    // priority is the only ordering the engine reads, so a move rewrites the whole run as 0..n-1.
+    fun move(from: Int, to: Int) {
+        val ordered = rules.sortedBy { it.priority }
+        if (to !in ordered.indices) return
+        val moved = ordered.toMutableList().apply { add(to, removeAt(from)) }
+        rules = moved.mapIndexed { i, r -> r.copy(priority = i) }.toMutableList()
+        persist()
+    }
+    val ordered = rules.sortedBy { it.priority }
 
     Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Features", style = MaterialTheme.typography.titleMedium)
         Text("BuzzKill-style SMS rules. Every matching rule runs, in priority order. Core filtering stays untouched.",
             style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = {
-                editing = AddonRule(name = "New rule", priority = rules.size)
-                showEditor = true
-            }) { Text("Add rule") }
+            Button(onClick = { addRule() }) { Text("Add rule") }
             TextButton(onClick = {
                 val result = FeatureSelfTest.run(ctx)
                 android.widget.Toast.makeText(ctx, result.lines().last(), android.widget.Toast.LENGTH_LONG).show()
             }) { Text("Self-test") }
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (rules.isEmpty()) {
+                item {
+                    Column(Modifier.fillMaxWidth().padding(vertical = 32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("No rules yet", style = MaterialTheme.typography.titleMedium)
+                        Text("A rule watches incoming SMS and runs its actions when the conditions match.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center)
+                        Button(onClick = { addRule() }) { Text("Add rule") }
+                    }
+                }
+            }
             item {
                 // Collapsed by default: the rules stay the page's subject.
                 Column {
@@ -981,7 +1013,7 @@ fun FeaturesPage() {
                     }
                 }
             }
-            items(rules.sortedBy { it.priority }, key = { it.id }) { rule ->
+            itemsIndexed(ordered, key = { _, r -> r.id }) { index, rule ->
                 Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.medium) {
                     Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -993,13 +1025,21 @@ fun FeaturesPage() {
                         }
                         Text("IF  " + conditionSummary(rule), style = MaterialTheme.typography.bodySmall)
                         Text("THEN  " + actionSummary(rule), style = MaterialTheme.typography.bodySmall)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = { editing = rule; showEditor = true }) { Text("Edit") }
-                            TextButton(onClick = { testing = rule }) { Text("Test") }
-                            TextButton(onClick = {
-                                rules = rules.filterNot { it.id == rule.id }.toMutableList()
-                                persist()
-                            }) { Text("Delete") }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = { editing = rule; showEditor = true }) { Text("Edit") }
+                                TextButton(onClick = { testing = rule }) { Text("Test") }
+                                TextButton(onClick = { deleting = rule }) { Text("Delete") }
+                            }
+                            // Up/down beats a drag handle here: two taps, reachable, and no drag state to keep.
+                            Row {
+                                IconButton(onClick = { move(index, index - 1) }, enabled = index > 0) {
+                                    Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up")
+                                }
+                                IconButton(onClick = { move(index, index + 1) }, enabled = index < ordered.lastIndex) {
+                                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down")
+                                }
+                            }
                         }
                     }
                 }
@@ -1019,19 +1059,47 @@ fun FeaturesPage() {
             onCancel = { showEditor = false })
     }
 
+    // Destructive and persisted: one tap must not be enough.
+    deleting?.let { rule ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("Delete rule?") },
+            text = { Text("\u201c${rule.name.ifBlank { rule.action }}\u201d and its settings will be removed. This cannot be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    rules = rules.filterNot { it.id == rule.id }.toMutableList()
+                    persist()
+                    deleting = null
+                }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } })
+    }
+
     // Dry-run: same matching code as the receive path, no actions, nothing written.
     testing?.let { rule ->
         var body by remember(rule.id) { mutableStateOf("") }
+        var sender by remember(rule.id) { mutableStateOf("") }
+        var spam by remember(rule.id) { mutableStateOf(false) }
+        // Sender and spam feed the same conditions the receive path evaluates, so sender/spam/contact
+        // rules are testable. Contacts are not resolved here: from-contact rules stay untestable.
         val reason = AddonRules.missReason(
-            rule, SmsEvent("", body, 0L, 0, 0L, false, false, null, 0)
+            rule, SmsEvent(sender, body, 0L, 0, 0L, spam, false, null, 0)
         )
         AlertDialog(
             onDismissRequest = { testing = null },
             title = { Text("Test: ${rule.name.ifBlank { rule.action }}") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = sender, onValueChange = { sender = it },
+                        label = { Text("Sender") }, modifier = Modifier.fillMaxWidth())
                     OutlinedTextField(value = body, onValueChange = { body = it },
                         label = { Text("Message body") }, modifier = Modifier.fillMaxWidth())
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Mark as spam")
+                        Switch(checked = spam, onCheckedChange = { spam = it })
+                    }
                     Text(
                         if (reason == null) "MATCH — the actions would run"
                         else "NO MATCH — ${reason} failed"
@@ -1074,6 +1142,9 @@ private fun actionSummary(rule: AddonRule): String {
     return if (rule.cooldownSeconds > 0) "$base · max once per ${rule.cooldownSeconds}s" else base
 }
 
+// Calendar.DAY_OF_WEEK numbering: 1 = Sunday … 7 = Saturday, the order daysOfWeek stores.
+private val DAY_CHIPS = listOf("Sun" to 1, "Mon" to 2, "Tue" to 3, "Wed" to 4, "Thu" to 5, "Fri" to 6, "Sat" to 7)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -> Unit) {
@@ -1104,6 +1175,13 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
     var emailBody by remember { mutableStateOf(rule.emailBody) }
     var emailApp by remember { mutableStateOf(rule.emailAppPackage) }
     var enabled by remember { mutableStateOf(rule.enabled) }
+    // Length/time dialogs keep their own draft state so Cancel really cancels.
+    var dlgMin by remember { mutableStateOf("") }
+    var dlgMax by remember { mutableStateOf("") }
+    var dlgDays by remember { mutableStateOf<Set<Int>>(emptySet()) }
+    var dlgStart by remember { mutableStateOf("") }
+    var dlgEnd by remember { mutableStateOf("") }
+    fun hourOk(v: String) = v.isBlank() || v.toIntOrNull()?.let { it in 0..23 } == true
 
     val emailApps = remember {
         val intent = Intent(Intent.ACTION_SEND).apply { type = "message/rfc822" }
@@ -1114,8 +1192,17 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
     var dialog by remember { mutableStateOf<String?>(null) }
     var dialogValue by remember { mutableStateOf("") }
 
-    // `action` drives which parameter fields to show: the first chip is the primary action.
-    val action = actions.firstOrNull() ?: rule.action
+    // Parameter fields follow every selected action, not just the first one: picking `email` second
+    // used to show no fields at all. email reads emailTo/Subject/Body/app; forward, autoreply,
+    // modify_text and alert all read the one `actionParam` string, so the first of those owns the
+    // field and a second one says so instead of pretending it has its own.
+    val paramActions = actions.filter { it == "email" || it in setOf("forward", "autoreply", "modify_text", "alert") }
+    val paramOwner = paramActions.firstOrNull { it != "email" }
+    fun paramLabel(a: String) = when (a) {
+        "autoreply" -> "Reply text"
+        "forward" -> "Forward number"
+        else -> "Text"
+    }
     // An unusable pattern (typed before the Regex chip was toggled, or imported from JSON) would
     // never fire at runtime, so the outer Save refuses it too, not just the keyword dialog.
     // Negation strips before compiling: "-^09\d{9}$" is judged as "^09\d{9}$".
@@ -1124,6 +1211,17 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
     fun openDialog(key: String, initial: String) {
         dialog = key
         dialogValue = initial
+    }
+    fun openLength() {
+        dlgMin = minLength
+        dlgMax = maxLength
+        dialog = "length"
+    }
+    fun openTime() {
+        dlgDays = days.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
+        dlgStart = startHour
+        dlgEnd = endHour
+        dialog = "time"
     }
 
     AlertDialog(
@@ -1145,26 +1243,34 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                     FilterChip(selected = keywordRegex, onClick = { keywordRegex = !keywordRegex },
                         label = { Text("Regex") })
                     // Plain keywords only: a regex owns its own boundaries, so the chip is off-limits then.
+                    // Disabled alpha is set on the label itself: the chip's own disabled colours are
+                    // too close to its neighbours to read as unavailable.
                     FilterChip(selected = keywordWholeWord && !keywordRegex, enabled = !keywordRegex,
                         onClick = { keywordWholeWord = !keywordWholeWord },
-                        label = { Text("Whole words") })
+                        label = { Text("Whole words", color = if (keywordRegex) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f) else Color.Unspecified) })
                     FilterChip(selected = contactsOnly, onClick = { contactsOnly = !contactsOnly },
                         label = { Text("From contacts") })
                     FilterChip(selected = spamOnly, onClick = { spamOnly = !spamOnly; if (spamOnly) notSpamOnly = false },
                         label = { Text("Spam only") })
                     FilterChip(selected = notSpamOnly, onClick = { notSpamOnly = !notSpamOnly; if (notSpamOnly) spamOnly = false },
                         label = { Text("Not spam only") })
-                    FilterChip(selected = otpMode != 0, onClick = { otpMode = (otpMode + 1) % 3 },
-                        label = { Text(when (otpMode) { 1 -> "OTP required"; 2 -> "No OTP"; else -> "Any OTP" }) })
+                    // Three chips, one selection: a cycle chip made "clear it" land on the opposite state.
+                    listOf("Any OTP" to 0, "OTP required" to 1, "No OTP" to 2).forEach { (label, mode) ->
+                        FilterChip(selected = otpMode == mode, onClick = { otpMode = mode }, label = { Text(label) })
+                    }
                     FilterChip(selected = minLength.isNotBlank() || maxLength.isNotBlank(),
-                        onClick = { openDialog("length", if (minLength.isNotBlank() || maxLength.isNotBlank()) "$minLength,$maxLength" else "") },
+                        onClick = { openLength() },
                         label = { Text(if (minLength.isBlank() && maxLength.isBlank()) "Length…" else "Length $minLength-$maxLength") })
                     FilterChip(selected = days.isNotBlank() || startHour.isNotBlank() || endHour.isNotBlank(),
-                        onClick = { openDialog("time", listOf(days, startHour, endHour).joinToString("|")) },
+                        onClick = { openTime() },
                         label = { Text(if (days.isBlank() && startHour.isBlank() && endHour.isBlank()) "Time…" else "Time ${days.ifBlank{"*"}} ${startHour.ifBlank{"0"}}-${endHour.ifBlank{"23"}}") })
                     // Zero conditions is inert by default, so "every SMS" has to be asked for.
                     FilterChip(selected = matchAny, onClick = { matchAny = !matchAny },
                         label = { Text("Any SMS") })
+                }
+                if (keywordRegex) {
+                    Text("Whole words is off under Regex — the pattern sets its own boundaries.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Text("THEN", style = MaterialTheme.typography.labelLarge)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1179,35 +1285,48 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                             }, label = { Text(a) })
                         }
                 }
-                if (action == "email") {
-                    OutlinedTextField(value = emailTo, onValueChange = { emailTo = it }, label = { Text("To email") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = emailSubject, onValueChange = { emailSubject = it }, label = { Text("Subject") }, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(value = emailBody, onValueChange = { emailBody = it }, label = { Text("Body") }, modifier = Modifier.fillMaxWidth())
-                    Text("Email app", style = MaterialTheme.typography.bodySmall)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilterChip(selected = emailApp.isBlank(), onClick = { emailApp = "" }, label = { Text("Chooser") })
-                        emailApps.forEach { app ->
-                            FilterChip(selected = emailApp == app.first, onClick = { emailApp = app.first }, label = { Text(app.second) })
+                paramActions.forEach { a ->
+                    Text(a, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (a == "email") {
+                        OutlinedTextField(value = emailTo, onValueChange = { emailTo = it }, label = { Text("To email") }, modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(value = emailSubject, onValueChange = { emailSubject = it }, label = { Text("Subject") }, modifier = Modifier.fillMaxWidth())
+                        OutlinedTextField(value = emailBody, onValueChange = { emailBody = it }, label = { Text("Body") }, modifier = Modifier.fillMaxWidth())
+                        Text("Email app", style = MaterialTheme.typography.bodySmall)
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(selected = emailApp.isBlank(), onClick = { emailApp = "" }, label = { Text("Chooser") })
+                            emailApps.forEach { app ->
+                                FilterChip(selected = emailApp == app.first, onClick = { emailApp = app.first }, label = { Text(app.second) })
+                            }
                         }
+                    } else if (a == paramOwner) {
+                        OutlinedTextField(value = param, onValueChange = { param = it },
+                            label = { Text(paramLabel(a)) }, modifier = Modifier.fillMaxWidth())
+                    } else {
+                        Text("${paramLabel(a)}: shares the one parameter field with ${paramLabel(paramOwner.orEmpty())}.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                } else if (action in listOf("forward", "autoreply", "modify_text", "alert")) {
-                    OutlinedTextField(value = param, onValueChange = { param = it },
-                        label = { Text(if (action == "autoreply") "Reply text" else if (action == "forward") "Forward number" else "Text") },
-                        modifier = Modifier.fillMaxWidth())
                 }
+                val cooldownCapped = cooldown.isNotBlank() &&
+                    AddonRules.clampCooldown(cooldown) < (cooldown.toIntOrNull() ?: Int.MAX_VALUE)
                 OutlinedTextField(value = cooldown, onValueChange = { cooldown = it.filter { c -> c.isDigit() } },
-                    label = { Text("Cooldown seconds (0 = every time, max ${AddonRules.MAX_COOLDOWN})") }, modifier = Modifier.fillMaxWidth())
-                if (badRegex.isNotEmpty()) {
-                    Text("regex unusable, will never match: ${badRegex.joinToString(" | ")}",
-                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                }
+                    label = { Text("Cooldown seconds (0 = every time, max ${AddonRules.MAX_COOLDOWN})") },
+                    isError = cooldownCapped,
+                    supportingText = { if (cooldownCapped) Text("Save caps this at ${AddonRules.MAX_COOLDOWN} s (24 h)") },
+                    modifier = Modifier.fillMaxWidth())
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("Enabled"); Switch(checked = enabled, onCheckedChange = { enabled = it })
+                }
+                // Kept directly above the disabled Save: a reason under a field the button cannot see is
+                // not a reason the button's owner can see either.
+                if (badRegex.isNotEmpty()) {
+                    Text("Can't save — regex unusable, will never match: ${badRegex.joinToString(" | ")}",
+                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
             }
         },
         confirmButton = {
-            TextButton(enabled = badRegex.isEmpty(), onClick = {
+            // Filled, not text: the default disabled state reads as grey container + 38% label.
+            Button(enabled = badRegex.isEmpty(), onClick = {
                 onSave(rule.copy(
                     name = name,
                     senderContains = sender,
@@ -1246,6 +1365,7 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
         val refused = if (dialog == "keyword" && keywordRegex)
             dialogValue.split("\n").map { it.trim() }.map { AddonRules.keywordTerm(it).second }.filter { it.isNotEmpty() && !AddonRules.regexUsable(it) }
         else emptyList()
+        val hoursBad = dialog == "time" && !(hourOk(dlgStart) && hourOk(dlgEnd))
         AlertDialog(
             onDismissRequest = { dialog = null },
             title = { Text(when (dialog) {
@@ -1257,37 +1377,61 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
             }) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = dialogValue, onValueChange = { dialogValue = it }, modifier = Modifier.fillMaxWidth(),
-                        label = { Text(when (dialog) {
-                            "sender" -> "Substring"
-                            "keyword" -> (if (keywordRegex) "one regex per line" else "a, b, c") + ", leading - excludes"
-                            "length" -> "min,max"
-                            "time" -> "days|start|end"
-                            else -> "Value"
-                        }) })
+                    when (dialog) {
+                        "length" -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(value = dlgMin, onValueChange = { dlgMin = it.filter(Char::isDigit) },
+                                label = { Text("Min length") }, modifier = Modifier.weight(1f))
+                            OutlinedTextField(value = dlgMax, onValueChange = { dlgMax = it.filter(Char::isDigit) },
+                                label = { Text("Max length") }, modifier = Modifier.weight(1f))
+                        }
+                        "time" -> {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                DAY_CHIPS.forEach { (label, day) ->
+                                    FilterChip(selected = day in dlgDays,
+                                        onClick = { dlgDays = if (day in dlgDays) dlgDays - day else dlgDays + day },
+                                        label = { Text(label) })
+                                }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedTextField(value = dlgStart, onValueChange = { dlgStart = it.filter(Char::isDigit).take(2) },
+                                    label = { Text("From hour") }, isError = !hourOk(dlgStart),
+                                    supportingText = { Text("0-23") }, modifier = Modifier.weight(1f))
+                                OutlinedTextField(value = dlgEnd, onValueChange = { dlgEnd = it.filter(Char::isDigit).take(2) },
+                                    label = { Text("To hour") }, isError = !hourOk(dlgEnd),
+                                    supportingText = { Text("0-23") }, modifier = Modifier.weight(1f))
+                            }
+                        }
+                        else -> OutlinedTextField(value = dialogValue, onValueChange = { dialogValue = it }, modifier = Modifier.fillMaxWidth(),
+                            isError = refused.isNotEmpty(),
+                            label = { Text(if (dialog == "sender") "Substring"
+                                else if (keywordRegex) "one regex per line, leading - excludes"
+                                else "a, b, c or new lines, leading - excludes") })
+                    }
+                    if (hoursBad) {
+                        Text("Hours must be 0-23.",
+                            color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
                     if (refused.isNotEmpty()) {
-                        Text("too complex or invalid, will never match: ${refused.joinToString(" | ")}",
+                        Text("Can't save — too complex or invalid, will never match: ${refused.joinToString(" | ")}",
                             color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                     }
                 }
             },
             confirmButton = {
-                TextButton(enabled = refused.isEmpty(), onClick = {
+                Button(enabled = refused.isEmpty() && !hoursBad, onClick = {
                     when (dialog) {
                         "sender" -> sender = dialogValue
                         // a regex may legitimately contain ',', e.g. a{1,3}: split on newline in regex mode only.
-                        "keyword" -> keywords = (if (keywordRegex) dialogValue.split("\n") else dialogValue.split(","))
+                        "keyword" -> keywords = (if (keywordRegex) dialogValue.split("\n") else dialogValue.split("\n", ","))
                             .map { it.trim() }.filter { it.isNotEmpty() }
                         "length" -> {
-                            val parts = dialogValue.split(",").map { it.trim() }
-                            minLength = parts.getOrElse(0) { "" }
-                            maxLength = parts.getOrElse(1) { "" }
+                            minLength = dlgMin
+                            maxLength = dlgMax
                         }
                         "time" -> {
-                            val parts = dialogValue.split("|").map { it.trim() }
-                            days = parts.getOrElse(0) { "" }
-                            startHour = parts.getOrElse(1) { "" }
-                            endHour = parts.getOrElse(2) { "" }
+                            days = dlgDays.sorted().joinToString(",")
+                            startHour = dlgStart
+                            endHour = dlgEnd
                         }
                     }
                     dialog = null
