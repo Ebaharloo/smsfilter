@@ -13,8 +13,8 @@ android {
         applicationId = "ir.smsfilter"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.3.13"
+        versionCode = 17
+        versionName = "0.3.14"
     }
 
     // single source of truth: the same rules.json the Python mirror reads

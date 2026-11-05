@@ -15,6 +15,13 @@ import ir.smsfilter.core.InboxPolicy
 internal fun isPersian(text: String) = text.any { it in '\u0600'..'\u06FF' }
 
 /**
+ * Wraps a user-supplied token in FSI/PDI so a Latin sentence frame and a Persian value cannot
+ * re-order each other ("not " + a Persian term reads as one directionless run without this).
+ * Same isolation character the message pipeline uses in InboxPolicy.forDisplay.
+ */
+internal fun isolate(text: String) = "\u2068$text\u2069"
+
+/**
  * Every message body in the app goes through here.
  *
  * A Persian sentence painted in a left-to-right paragraph is not just misaligned: the bidi
@@ -26,6 +33,7 @@ internal fun isPersian(text: String) = text.any { it in '\u0600'..'\u06FF' }
 internal fun BodyText(
     text: String,
     fontSize: TextUnit,
+    style: TextStyle = TextStyle(),
     color: Color = Color.Unspecified,
     lineHeight: TextUnit = TextUnit.Unspecified,
     maxLines: Int = Int.MAX_VALUE,
@@ -45,7 +53,7 @@ internal fun BodyText(
         lineHeight = lineHeight,
         maxLines = maxLines,
         overflow = overflow,
-        style = TextStyle(textDirection = if (farsi) TextDirection.Rtl else TextDirection.Ltr),
+        style = style.copy(textDirection = if (farsi) TextDirection.Rtl else TextDirection.Ltr),
         textAlign = if (farsi) TextAlign.Right else TextAlign.Start,
         modifier = modifier
     )

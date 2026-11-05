@@ -9,6 +9,7 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -20,8 +21,10 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -34,7 +37,6 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Divider
@@ -108,7 +110,17 @@ private fun miuiDark() = darkColorScheme(
     onSurface = androidx.compose.ui.graphics.Color.White,
     surfaceVariant = Color(0xFF262626),
     onSurfaceVariant = Color(0xFF9E9E9E),
-    outline = Color(0xFF3A3A3A)
+    // The container roles are the app's own, not the baseline purple-grey: AlertDialog paints
+    // surfaceContainerHigh and a tonal elevation over #000 measured 1.05:1 - no container at all.
+    surfaceContainerLowest = Color(0xFF000000),
+    surfaceContainerLow = Color(0xFF131A22),
+    surfaceContainer = Color(0xFF1A222C),
+    surfaceContainerHigh = Color(0xFF222B36),
+    surfaceContainerHighest = Color(0xFF2A3440),
+    surfaceDim = Color(0xFF000000),
+    surfaceBright = Color(0xFF2A3440),
+    outline = Color(0xFF3A3A3A),
+    outlineVariant = Color(0xFF37424F)
 )
 
 private fun miuiLight() = lightColorScheme(
@@ -122,7 +134,15 @@ private fun miuiLight() = lightColorScheme(
     onSurface = Color(0xFF111111),
     surfaceVariant = Color(0xFFF2F2F2),
     onSurfaceVariant = Color(0xFF6B6B6B),
-    outline = Color(0xFFDADADA)
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFF7F9FC),
+    surfaceContainer = Color(0xFFF1F4F9),
+    surfaceContainerHigh = Color(0xFFEBEFF6),
+    surfaceContainerHighest = Color(0xFFE3E8F0),
+    surfaceDim = Color(0xFFDDE3EC),
+    surfaceBright = Color(0xFFFFFFFF),
+    outline = Color(0xFFDADADA),
+    outlineVariant = Color(0xFFD5DBE4)
 )
 
 /** an outside request to write to somebody: address book, a browser `sms:` link, a notification */
@@ -276,8 +296,14 @@ fun App(
     }
 
     val base = LocalDensity.current
+    // The system scale is the user's accessibility setting; the app's own size multiplies it
+    // instead of replacing it. Dialogs re-apply this value (see AppAlertDialog).
+    val appDensity = Density(base.density, base.fontScale * fontScale)
     MaterialTheme(colorScheme = if (dark) miuiDark() else miuiLight()) {
-      CompositionLocalProvider(LocalDensity provides Density(base.density, fontScale)) {
+      CompositionLocalProvider(
+          LocalDensity provides appDensity,
+          LocalAppDensity provides appDensity
+      ) {
         ModalNavigationDrawer(
             drawerState = drawer,
             drawerContent = {
@@ -327,6 +353,10 @@ fun App(
                 }
             ) { pad ->
                 Surface(Modifier.fillMaxSize().padding(pad), color = MaterialTheme.colorScheme.background) {
+                    // A readable measure: without it a 2275 dp window stretched one row's actions and
+                    // its reorder arrows 1885 dp apart. 840 dp still holds the editor's chip rows.
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                        Box(Modifier.fillMaxHeight().widthIn(max = 840.dp).fillMaxWidth()) {
                     when (page) {
                         Page.Inbox -> {
                             val open = thread
@@ -368,6 +398,8 @@ fun App(
                         )
                         Page.Settings -> SettingsPage()
 Page.Features -> FeaturesPage()
+                    }
+                        }
                     }
                 }
             }
@@ -592,7 +624,7 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
     }
 
     if (confirmClear) {
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { confirmClear = false },
             title = { Text("Delete all ads?") },
             text = { Text("Removes the kept ad copies from this app. Your SMS inbox is not touched.") },
@@ -610,7 +642,7 @@ fun AdsPage(store: Store, learned: Learned, onBack: () -> Unit = {}) {
     }
 
     if (confirmRecheck) {
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { confirmRecheck = false },
             title = { Text("Re-check the ads page?") },
             text = {
@@ -1004,7 +1036,12 @@ fun FeaturesPage() {
                         if (decisions.isEmpty()) {
                             Text("No decisions yet.", style = MaterialTheme.typography.bodySmall)
                         } else {
-                            decisions.forEach { Text(it, style = MaterialTheme.typography.bodySmall) }
+                            // Time/sender are Latin inside a Persian body: BodyText picks the
+                            // paragraph direction and isolates the Latin runs.
+                            decisions.forEach {
+                                BodyText(it, fontSize = androidx.compose.ui.unit.TextUnit.Unspecified,
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
                             TextButton(onClick = {
                                 AddonRules.clearDecisions(ctx)
                                 decisions = emptyList()
@@ -1014,7 +1051,12 @@ fun FeaturesPage() {
                 }
             }
             itemsIndexed(ordered, key = { _, r -> r.id }) { index, rule ->
-                Surface(tonalElevation = 2.dp, shape = MaterialTheme.shapes.medium) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    shape = MaterialTheme.shapes.medium,
+                    // A tonal step over true black was 1.05:1; the container needs an edge as well.
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
                     Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text(rule.name.ifBlank { rule.action }, style = MaterialTheme.typography.bodyLarge)
@@ -1025,20 +1067,17 @@ fun FeaturesPage() {
                         }
                         Text("IF  " + conditionSummary(rule), style = MaterialTheme.typography.bodySmall)
                         Text("THEN  " + actionSummary(rule), style = MaterialTheme.typography.bodySmall)
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                TextButton(onClick = { editing = rule; showEditor = true }) { Text("Edit") }
-                                TextButton(onClick = { testing = rule }) { Text("Test") }
-                                TextButton(onClick = { deleting = rule }) { Text("Delete") }
-                            }
+                        // One cluster: SpaceBetween put the reorder arrows a screen away from the actions.
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = { editing = rule; showEditor = true }) { Text("Edit") }
+                            TextButton(onClick = { testing = rule }) { Text("Test") }
+                            TextButton(onClick = { deleting = rule }) { Text("Delete") }
                             // Up/down beats a drag handle here: two taps, reachable, and no drag state to keep.
-                            Row {
-                                IconButton(onClick = { move(index, index - 1) }, enabled = index > 0) {
-                                    Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up")
-                                }
-                                IconButton(onClick = { move(index, index + 1) }, enabled = index < ordered.lastIndex) {
-                                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down")
-                                }
+                            IconButton(onClick = { move(index, index - 1) }, enabled = index > 0) {
+                                Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up")
+                            }
+                            IconButton(onClick = { move(index, index + 1) }, enabled = index < ordered.lastIndex) {
+                                Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down")
                             }
                         }
                     }
@@ -1061,10 +1100,10 @@ fun FeaturesPage() {
 
     // Destructive and persisted: one tap must not be enough.
     deleting?.let { rule ->
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { deleting = null },
             title = { Text("Delete rule?") },
-            text = { Text("\u201c${rule.name.ifBlank { rule.action }}\u201d and its settings will be removed. This cannot be undone.") },
+            text = { Text("\u201c${isolate(rule.name.ifBlank { rule.action })}\u201d and its settings will be removed. This cannot be undone.") },
             confirmButton = {
                 TextButton(onClick = {
                     rules = rules.filterNot { it.id == rule.id }.toMutableList()
@@ -1087,9 +1126,9 @@ fun FeaturesPage() {
         val reason = AddonRules.missReason(
             rule, SmsEvent(sender, body, 0L, 0, 0L, spam, false, null, 0)
         )
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { testing = null },
-            title = { Text("Test: ${rule.name.ifBlank { rule.action }}") },
+            title = { Text("Test: ${isolate(rule.name.ifBlank { rule.action })}") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(value = sender, onValueChange = { sender = it },
@@ -1112,10 +1151,10 @@ fun FeaturesPage() {
 
 private fun conditionSummary(rule: AddonRule): String {
     val parts = mutableListOf<String>()
-    if (rule.senderContains.isNotBlank()) parts += "sender contains '${rule.senderContains}'"
+    if (rule.senderContains.isNotBlank()) parts += "sender contains '${isolate(rule.senderContains)}'"
     val terms = if (rule.keywords.isNotEmpty()) rule.keywords else listOf(rule.keywordContains).filter { it.isNotBlank() }
     if (terms.isNotEmpty()) {
-        fun show(t: String) = (if (rule.keywordRegex) "/%s/" else "'%s'").format(AddonRules.keywordTerm(t).second)
+        fun show(t: String) = isolate((if (rule.keywordRegex) "/%s/" else "'%s'").format(AddonRules.keywordTerm(t).second))
         val (not, yes) = terms.partition { AddonRules.keywordTerm(it).first }
         val mode = if (rule.keywordMode.equals("OR", ignoreCase = true)) "any" else "all"
         val words = if (rule.keywordWholeWord && !rule.keywordRegex) " (whole words)" else ""
@@ -1138,7 +1177,7 @@ private fun conditionSummary(rule: AddonRule): String {
 
 private fun actionSummary(rule: AddonRule): String {
     val base = rule.actions.ifEmpty { listOf(rule.action) }.joinToString(" + ") +
-        if (rule.actionParam.isNotBlank()) " (${rule.actionParam})" else ""
+        if (rule.actionParam.isNotBlank()) " (${isolate(rule.actionParam)})" else ""
     return if (rule.cooldownSeconds > 0) "$base · max once per ${rule.cooldownSeconds}s" else base
 }
 
@@ -1224,7 +1263,7 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
         dialog = "time"
     }
 
-    AlertDialog(
+    AppAlertDialog(
         onDismissRequest = onCancel,
         title = { Text("Edit rule") },
         text = {
@@ -1232,11 +1271,15 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                 OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, modifier = Modifier.fillMaxWidth())
 
                 Text("IF", style = MaterialTheme.typography.labelLarge)
+                if (keywordRegex) {
+                    Text("Whole words is off under Regex — the pattern sets its own boundaries.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(selected = sender.isNotBlank(), onClick = { openDialog("sender", sender) },
-                        label = { Text(if (sender.isBlank()) "Sender contains…" else "Sender: $sender") })
+                        label = { Text(if (sender.isBlank()) "Sender contains…" else "Sender: ${isolate(sender)}") })
                     FilterChip(selected = keywords.isNotEmpty(), onClick = { openDialog("keyword", keywords.joinToString(if (keywordRegex) "\n" else ", ")) },
-                        label = { Text(if (keywords.isEmpty()) "Message contains…" else "Message: ${keywords.joinToString(if (keywordRegex) " | " else ", ") { (if (AddonRules.keywordTerm(it).first) "not " else "") + AddonRules.keywordTerm(it).second }}") })
+                        label = { Text(if (keywords.isEmpty()) "Message contains…" else "Message: ${keywords.joinToString(if (keywordRegex) " | " else ", ") { (if (AddonRules.keywordTerm(it).first) "not " else "") + isolate(AddonRules.keywordTerm(it).second) }}") })
                     FilterChip(selected = keywordMode.equals("OR", ignoreCase = true),
                         onClick = { keywordMode = if (keywordMode.equals("OR", ignoreCase = true)) "AND" else "OR" },
                         label = { Text(if (keywordMode.equals("OR", ignoreCase = true)) "Any keyword" else "All keywords") })
@@ -1267,10 +1310,6 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
                     // Zero conditions is inert by default, so "every SMS" has to be asked for.
                     FilterChip(selected = matchAny, onClick = { matchAny = !matchAny },
                         label = { Text("Any SMS") })
-                }
-                if (keywordRegex) {
-                    Text("Whole words is off under Regex — the pattern sets its own boundaries.",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Text("THEN", style = MaterialTheme.typography.labelLarge)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1366,7 +1405,7 @@ fun AddonRuleEditor(rule: AddonRule, onSave: (AddonRule) -> Unit, onCancel: () -
             dialogValue.split("\n").map { it.trim() }.map { AddonRules.keywordTerm(it).second }.filter { it.isNotEmpty() && !AddonRules.regexUsable(it) }
         else emptyList()
         val hoursBad = dialog == "time" && !(hourOk(dlgStart) && hourOk(dlgEnd))
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { dialog = null },
             title = { Text(when (dialog) {
                 "sender" -> "Sender contains"

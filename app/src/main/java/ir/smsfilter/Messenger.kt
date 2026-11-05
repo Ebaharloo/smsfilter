@@ -46,7 +46,6 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Divider
@@ -416,7 +415,7 @@ fun ConversationsPage(
 
     // archive has an UNDO; deleting cannot be undone, so it asks first
     confirmDelete?.let { ids ->
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { confirmDelete = null },
             title = { Text(if (ids.size == 1) "Delete conversation?" else "Delete ${ids.size} conversations?") },
             text = { Text("The messages are removed from your SMS store. This cannot be undone.") },
@@ -1193,7 +1192,7 @@ fun ThreadPage(
     }
 
     if (confirmDeleteThread) {
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { confirmDeleteThread = false },
             title = { Text("Delete this conversation?") },
             text = { Text("Every message in it is removed from your SMS store. This cannot be undone.") },
@@ -1213,7 +1212,7 @@ fun ThreadPage(
     }
 
     details?.let { m ->
-        AlertDialog(
+        AppAlertDialog(
             onDismissRequest = { details = null },
             title = { Text("Details") },
             text = {
