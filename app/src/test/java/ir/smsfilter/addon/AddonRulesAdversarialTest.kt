@@ -2003,4 +2003,173 @@ class AddonRulesAdversarialTest {
         val dirty = "کد " + (0 until 20).joinToString(" ") { "لغو$it" } + " " + (0 until 20).joinToString(" ") { "تخفیف$it" }
         assertEquals("negatives veto every rule", emptyList<AddonRule>(), AddonRules.matching(p.ctx, ev(body = dirty), 0L))
     }
+
+    // ---------- S8 gate: whole-word keywords (Unicode-aware boundaries) ----------
+
+    private fun ww(vararg terms: String) = AddonRule(keywords = terms.toList(), keywordWholeWord = true)
+
+    /** Case 1: the word stands alone everywhere it may, and only then. */
+    @Test
+    fun s8WamMatchesOnlyAsWholeWord() {
+        val r = ww("وام")
+        assertTrue(AddonRules.matches(r, ev(body = "وام ۵۰۰ میلیون")))
+        assertFalse("prefix inside دوام", AddonRules.matches(r, ev(body = "دوام")))
+        assertFalse("suffix inside وامدار", AddonRules.matches(r, ev(body = "وامدار")))
+        // ZWNJ compound: normalize() turns ZWNJ into a space before the boundary test, so this
+        // matches. Same direction as legacy substring, never match-all. Residual R1 in TEST-S8.md.
+        assertTrue("ZWNJ compound reads as two words", AddonRules.matches(r, ev(body = "وام\u200Cدار")))
+    }
+
+    /** Case 2: every delimiter the task lists, on both sides, plus string edges. */
+    @Test
+    fun s8BoundaryCharsOnBothSides() {
+        val r = ww("وام")
+        assertTrue("start of string", AddonRules.matches(r, ev(body = "وام")))
+        assertTrue("end of string", AddonRules.matches(r, ev(body = "۵۰۰ وام")))
+        val chars = listOf("(", ")", "،", ".", "!", "?", "\n", "-", "—", "،", "؟")
+        for (c in chars) {
+            assertTrue("before <$c>", AddonRules.matches(r, ev(body = "وام$c")))
+            assertTrue("after <$c>", AddonRules.matches(r, ev(body = "${c}وام")))
+        }
+        // '_' is a word char by design (Java \w parity): وام_500 is one token, not a boundary.
+        assertFalse("underscore is a word char", AddonRules.matches(r, ev(body = "وام_500")))
+        // digits are word chars too: an attached number is not a boundary.
+        assertFalse("attached digit", AddonRules.matches(r, ev(body = "وام500")))
+    }
+
+    /** Case 3: phrases stay phrases; regex metacharacters are literal in word mode. */
+    @Test
+    fun s8PhraseAndMetacharsAreLiteral() {
+        val phrase = ww("کد تایید")
+        assertTrue(AddonRules.matches(phrase, ev(body = "کد تایید شما 12345")))
+        assertTrue(AddonRules.matches(phrase, ev(body = "کد تایید.")))
+        assertFalse("glued phrase is not the phrase", AddonRules.matches(phrase, ev(body = "کدتایید شما")))
+        assertFalse("extra word inside breaks the phrase", AddonRules.matches(phrase, ev(body = "کد و تایید")))
+
+        assertTrue("dots are literal", AddonRules.matches(ww("2.5"), ev(body = "مبلغ 2.5 میلیون")))
+        assertFalse("dot must not act as regex any-char", AddonRules.matches(ww("2.5"), ev(body = "مبلغ 2x5 میلیون")))
+        assertTrue("* is literal", AddonRules.matches(ww("10*20"), ev(body = "بسته 10*20")))
+        assertFalse("star must not act as regex quantifier", AddonRules.matches(ww("10*20"), ev(body = "بسته 1000")))
+        assertTrue("( is literal", AddonRules.matches(ww("وام(۱)"), ev(body = "وام(1)")))
+        assertFalse("unbalanced ( must not throw or match", AddonRules.matches(ww("وام("), ev(body = "وام 500")))
+    }
+
+    /** Case 4: ZWNJ and spaced spellings are one term after normalize(); state which way it falls. */
+    @Test
+    fun s8ZwnjAndSpacedEvasion() {
+        assertTrue("ZWNJ keyword vs spaced body",
+            AddonRules.matches(ww("نیم\u200Cفاصله"), ev(body = "این نیم فاصله است")))
+        assertTrue("spaced keyword vs ZWNJ body",
+            AddonRules.matches(ww("نیم فاصله"), ev(body = "این نیم\u200Cفاصله است")))
+        assertTrue("ZWNJ keyword vs ZWNJ body",
+            AddonRules.matches(ww("نیم\u200Cفاصله"), ev(body = "این نیم\u200Cفاصله است")))
+        // Sane outcome for the evasion itself: both spellings match. Side effect: a ZWNJ compound
+        // also exposes its first half as a standalone word (R1).
+        assertTrue("half of a ZWNJ compound also matches",
+            AddonRules.matches(ww("نیم"), ev(body = "نیم\u200Cفاصله")))
+    }
+
+    /** Case 5: letter/digit folding happens before the boundary decision, case included. */
+    @Test
+    fun s8FoldsBeforeBoundaryTest() {
+        assertTrue("Arabic kaf folds", AddonRules.matches(ww("كارت"), ev(body = "کارت به کارت")))
+        assertTrue("Arabic yeh folds", AddonRules.matches(ww("ايران"), ev(body = "ایران خودرو")))
+        assertTrue("Persian digits fold", AddonRules.matches(ww("وام ۵۰۰"), ev(body = "وام 500 میلیون")))
+        assertTrue("case folds", AddonRules.matches(ww("OTP"), ev(body = "send otp 123")))
+        // Folding must not manufacture a boundary: کارتها is still one word.
+        assertFalse("folded plural is not the word", AddonRules.matches(ww("كارت"), ev(body = "كارتها")))
+        assertFalse("digits glued to letters stay one token", AddonRules.matches(ww("۵۰۰"), ev(body = "وام500")))
+        assertTrue("standalone digits match", AddonRules.matches(ww("۵۰۰"), ev(body = "وام 500 میلیون")))
+    }
+
+    /** Case 6: a whole-word negative excludes only standalone occurrences. */
+    @Test
+    fun s8NegativeIsWholeWordToo() {
+        val r = AddonRule(keywords = listOf("کد", "-وام"), keywordWholeWord = true)
+        assertTrue("دوام is a different word", AddonRules.matches(r, ev(body = "کد دوام")))
+        assertTrue("وامدار is a different word", AddonRules.matches(r, ev(body = "کد وامدار")))
+        assertTrue("attached digit is a different token", AddonRules.matches(r, ev(body = "کد وام500")))
+        assertFalse("standalone وام excluded", AddonRules.matches(r, ev(body = "کد وام")))
+        assertFalse("standalone وام before punctuation excluded", AddonRules.matches(r, ev(body = "کد: وام.")))
+    }
+
+    /** Case 7: flag off keeps the exact legacy substring behaviour (regression). */
+    @Test
+    fun s8FlagOffIsLegacySubstring() {
+        assertTrue(AddonRules.matches(AddonRule(keywords = listOf("وام")), ev(body = "دوام")))
+        assertTrue(AddonRules.matches(AddonRule(keywordContains = "وام"), ev(body = "وامدار")))
+        assertFalse("default is off", AddonRule(keywords = listOf("وام")).keywordWholeWord)
+        // keywordContains also honours the flag when it is on (single-term legacy field).
+        assertFalse(AddonRules.matches(AddonRule(keywordContains = "وام", keywordWholeWord = true), ev(body = "دوام")))
+    }
+
+    /** Case 8: degenerate bodies are safe, and 20 whole-word rules on 200 chars stay cheap. */
+    @Test
+    fun s8EdgeBodiesAndCost() {
+        val r = ww("وام")
+        assertFalse("empty body", AddonRules.matches(r, ev(body = "")))
+        assertFalse("punctuation-only body", AddonRules.matches(r, ev(body = "!!!؟؟؟،،،...")))
+        assertFalse("whitespace-only body", AddonRules.matches(r, ev(body = "   ")))
+        assertFalse("whole body shorter than term", AddonRules.matches(r, ev(body = "وا")))
+        assertTrue("term equal to whole body", AddonRules.matches(r, ev(body = "وام")))
+
+        val p = prefs(null)
+        val words = listOf("وام", "کد", "بانک", "مبلغ", "تخفیف", "کارت", "حساب", "شماره", "پرداخت", "برداشت",
+            "موجودی", "قسط", "سود", "اعتبار", "خرید", "فروش", "تایید", "لغو", "رمز", "قسط2")
+        rules(p.ctx, *words.mapIndexed { i, w ->
+            AddonRule(id = "w$i", priority = i, keywords = listOf(w), keywordWholeWord = true, action = "copy_body")
+        }.toTypedArray())
+        val body = ("وام 500 میلیون تومان؛ کد تایید 12345. " + "لورم ایپسوم متن ساختگی برای سنجش سرعت. ".repeat(6)).take(200)
+        assertEquals(200, body.length)
+        val e = ev(body = body)
+
+        repeat(50) { AddonRules.matching(p.ctx, e, 0L) }
+        val runs = 200
+        val t0 = System.nanoTime()
+        var matched = 0
+        repeat(runs) { matched = AddonRules.matching(p.ctx, e, 0L).size }
+        val avgMs = (System.nanoTime() - t0) / runs / 1_000_000.0
+        println("S8 cost: 20 whole-word rules on ${body.length}-char body -> ${"%.3f".format(avgMs)}ms ($matched matched)")
+        assertEquals("وام، کد and تایید hit, nothing else", 3, matched)
+        assertTrue("S8 FAIL: ${"%.2f".format(avgMs)}ms, budget 100ms", avgMs < 100.0)
+    }
+
+    /** Case 9: an unusable whole-word term can never widen the rule to match-all. */
+    @Test
+    fun s8NoWideningPath() {
+        val bodies = listOf("سلام دوستان", "وام 500", "", "!!!")
+        for (term in listOf("", "  ", "\u200C", "\u200C\t", "-", "\u064B")) {
+            val r = ww(term)
+            for (b in bodies) {
+                assertFalse("term <$term> must not match-all on <$b>", AddonRules.matches(r, ev(body = b)))
+            }
+            assertEquals("term <$term> fails the keyword condition", "keyword", AddonRules.missReason(r, ev(body = "سلام")))
+        }
+        // Regex-shaped literals are searched as text, so they cannot match everything either.
+        for (term in listOf(".*", "(.*)", ".+", "\\d*")) {
+            for (b in bodies) {
+                assertFalse("literal <$term> must not match-all on <$b>", AddonRules.matches(ww(term), ev(body = b)))
+            }
+        }
+        // Negative-only rule is the S7 contract, not S8 widening: everything but the word.
+        val negOnly = ww("-وام")
+        assertTrue(AddonRules.matches(negOnly, ev(body = "سلام")))
+        assertFalse(AddonRules.matches(negOnly, ev(body = "وام")))
+        // Unusable negative makes the rule unsatisfiable instead of vacuous.
+        assertFalse(AddonRules.matches(AddonRule(keywords = listOf("وام", "-\u200C"), keywordWholeWord = true), ev(body = "وام")))
+    }
+
+    /** Flag survives the real JSON round trip and stays off for old rules. */
+    @Test
+    fun s8WholeWordSurvivesSaveLoad() {
+        val p = prefs(null)
+        AddonRules.save(p.ctx, listOf(AddonRule(id = "w", keywords = listOf("وام"), keywordWholeWord = true)))
+        val back = AddonRules.load(p.ctx).single()
+        assertTrue("flag persists", back.keywordWholeWord)
+        assertTrue("still matches its word", AddonRules.matches(back, ev(body = "وام 500")))
+        assertFalse("still rejects the compound", AddonRules.matches(back, ev(body = "دوام")))
+        val legacy = AddonRules.load(prefs("""[{"id":"old","keywordContains":"وام"}]""").ctx).single()
+        assertFalse("old JSON loads with the flag off", legacy.keywordWholeWord)
+        assertTrue("and keeps legacy substring behaviour", AddonRules.matches(legacy, ev(body = "دوام")))
+    }
 }
