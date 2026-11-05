@@ -797,12 +797,12 @@ class AddonRulesTest {
         val e = event(sender = "123", fromContact = true, body = "hello")
         val real = AddonRules.send
         try {
-            AddonRules.send = { _, _, _ -> false }
+            AddonRules.send = { _, _, _, _ -> false }
             assertFalse("autoreply must report the failed send",
                 AddonRules.execute(p.ctx, AddonRule(action = "autoreply", actionParam = "hi"), e))
             assertFalse("forward must report the failed send",
                 AddonRules.execute(p.ctx, AddonRule(action = "forward", actionParam = "0912"), e))
-            AddonRules.send = { _, _, _ -> true }
+            AddonRules.send = { _, _, _, _ -> true }
             assertTrue(AddonRules.execute(p.ctx, AddonRule(action = "autoreply", actionParam = "hi"), e))
             assertTrue(AddonRules.execute(p.ctx, AddonRule(action = "forward", actionParam = "0912"), e))
         } finally {
@@ -1054,13 +1054,14 @@ class AddonRulesTest {
         )
         val acts = listOf(
             Act("forward", mapOf("number" to "0912")),
-            Act("open_app", mapOf("package" to "com.telegram.messenger"))
+            Act("open_app", mapOf("package" to "com.telegram.messenger")),
+            Act("reply_blank")
         )
         AddonRules.save(p.ctx, listOf(AddonRule(id = "t", conditions = tree, actionList = acts)))
         val back = AddonRules.load(p.ctx).single()
         assertEquals(tree, back.conditions)
         assertEquals(acts, back.actionList)
-        assertEquals(listOf("forward", "open_app"), AddonRules.actsOf(back).map { it.type })
+        assertEquals(listOf("forward", "open_app", "reply_blank"), AddonRules.actsOf(back).map { it.type })
         assertTrue("the tree is what matches, not the projected flat fields", AddonRules.matches(back, event(sender = "bank", body = "رمز شما")))
     }
 
@@ -1147,7 +1148,7 @@ class AddonRulesTest {
         val sent = mutableListOf<Pair<String, String>>()
         val real = AddonRules.send
         try {
-            AddonRules.send = { _, to, text -> sent += to to text; true }
+            AddonRules.send = { _, to, text, _ -> sent += to to text; true }
             val rule = AddonRule(
                 id = "f",
                 actionList = listOf(
@@ -1159,6 +1160,72 @@ class AddonRulesTest {
             assertEquals(3, AddonRules.executeAll(p.ctx, rule, event(sender = "123", fromContact = true, body = "hello")))
             assertEquals(listOf("111", "222", "123"), sent.map { it.first })
             assertEquals(listOf("hello", "hello", "hi"), sent.map { it.second })
+        } finally {
+            AddonRules.send = real
+        }
+    }
+
+    @Test
+    fun replyBlankSendsEmptySmsToTheSenderOnItsOwnSim() {
+        val p = FakeClipPrefs()
+        val calls = mutableListOf<Triple<String, String, Int>>()
+        val real = AddonRules.send
+        try {
+            AddonRules.send = { _, to, text, sub -> calls += Triple(to, text, sub); true }
+            val e = event(sender = " 0912 ", body = "لغو11").copy(subId = 3)
+            assertTrue(AddonRules.execute(p.ctx, AddonRule(action = "reply_blank"), e))
+            assertEquals("exactly one SMS", 1, calls.size)
+            assertEquals("0912", calls.single().first)
+            assertTrue("empty body, or the single-space fallback", calls.single().second.isBlank())
+            assertEquals("sent on the receiving subscription", 3, calls.single().third)
+        } finally {
+            AddonRules.send = real
+        }
+    }
+
+    @Test
+    fun replyBlankWithNoSenderDoesNotSend() {
+        val p = FakeClipPrefs()
+        var calls = 0
+        val real = AddonRules.send
+        try {
+            AddonRules.send = { _, _, _, _ -> calls++; true }
+            assertFalse(AddonRules.execute(p.ctx, AddonRule(action = "reply_blank"), event(sender = "   ")))
+            assertEquals(0, calls)
+        } finally {
+            AddonRules.send = real
+        }
+    }
+
+    @Test
+    fun throwingReplyBlankIsFalseAndDoesNotArmTheCooldown() {
+        val p = FakePrefs()
+        val rule = AddonRule(id = "rb", keywordContains = "لغو11", action = "reply_blank", cooldownSeconds = 60)
+        rules(p, rule)
+        val real = AddonRules.send
+        try {
+            AddonRules.send = { _, _, _, _ -> throw IllegalStateException("no radio") }
+            AddonBus.dispatch(p.ctx, event(body = "لغو11"))
+            assertFalse("a failed send must not start the cooldown", p.values.containsKey("addon_fired_rb"))
+            assertTrue("so the next SMS retries", AddonRules.allowedNow(p.ctx, rule, System.currentTimeMillis()))
+        } finally {
+            AddonRules.send = real
+        }
+    }
+
+    @Test
+    fun replyBlankFiresOnceThenTheCooldownBlocks() {
+        val p = FakePrefs()
+        val rule = AddonRule(id = "unsub", keywordContains = "لغو11", action = "reply_blank", cooldownSeconds = 60)
+        rules(p, rule)
+        val sent = mutableListOf<String>()
+        val real = AddonRules.send
+        try {
+            AddonRules.send = { _, to, _, _ -> sent += to; true }
+            AddonBus.dispatch(p.ctx, event(sender = "1000", body = "لغو11"))
+            AddonBus.dispatch(p.ctx, event(sender = "1000", body = "لغو11"))
+            assertEquals("second SMS inside the window is blocked", listOf("1000"), sent)
+            assertTrue(p.values.containsKey("addon_fired_unsub"))
         } finally {
             AddonRules.send = real
         }

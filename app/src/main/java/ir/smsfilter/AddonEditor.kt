@@ -626,6 +626,11 @@ private fun ActCard(
                 "open_app" -> PackageField("App", act, "package", onEdit) { onPick("launch") }
                 "call" -> ParamField("Number", act, "number", onEdit, helper = "Blank = reply to the sender")
                 "share" -> PackageField("App (optional)", act, "package", onEdit) { onPick("send") }
+                "reply_blank" -> Text(
+                    "Sends one real SMS to the sender each time this rule fires — add a cooldown.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
                 else -> Unit
             }
         }
@@ -760,6 +765,7 @@ private val ACTION_TYPES = listOf(
     "copy_otp" to "Copy OTP",
     "copy_body" to "Copy message",
     "autoreply" to "Auto-reply",
+    "reply_blank" to "Reply with an empty SMS",
     "forward" to "Forward SMS",
     "email" to "Send email",
     "open_app" to "Open app",

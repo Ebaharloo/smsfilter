@@ -586,6 +586,7 @@ object AddonRules {
             "call" -> "call ${p("number").ifBlank { "sender" }}"
             "share" -> "share ${p("package").ifBlank { "chooser" }.let(appName)}"
             "autoreply" -> "auto-reply"
+            "reply_blank" -> "reply with an empty SMS"
             "modify_text" -> "modify text"
             else -> a.type.replace('_', ' ')
         }
@@ -731,7 +732,10 @@ object AddonRules {
     }
 
     // Seam: Sms.send needs a radio and the SEND_SMS grant, so the JVM tests swap this.
-    internal var send: (Context, String, String) -> Boolean = { c, a, b -> Sms.send(c, a, b) }
+    // subId <= 0 means "let the platform pick the default subscription".
+    internal var send: (Context, String, String, Int) -> Boolean = { c, a, b, sub ->
+        Sms.send(c, a, b, sub.takeIf { it > 0 })
+    }
 
     // Seam for every activity launch (open_app/call/share/email): resolves first so a missing target is
     // a plain false instead of an ActivityNotFoundException, and the JVM tests can swap it.
@@ -826,11 +830,24 @@ object AddonRules {
                     ctx.getSharedPreferences(FilterService.PREFS, Context.MODE_PRIVATE)
                         .getString("addon_autoreply_text", "پیام شما دریافت شد").orEmpty()
                 }
-                if (template.isBlank()) false else send(ctx, event.sender, template)
+                if (template.isBlank()) false else send(ctx, event.sender, template, -1)
             } else false
             "forward" -> if (p["number"].orEmpty().isNotBlank()) {
-                send(ctx, p["number"].orEmpty(), event.body)
+                send(ctx, p["number"].orEmpty(), event.body, -1)
             } else false
+            // Same SIM the SMS arrived on.
+            // shortcut: Android 15 SmsManager refuses "" ("Invalid message body"), and an attempt
+            // first leaves a failed row in the sent thread, so a single space is the smallest body
+            // that actually sends. Revisit if a target device accepts a truly empty body.
+            "reply_blank" -> {
+                val to = event.sender.trim()
+                if (to.isEmpty()) false else try {
+                    send(ctx, to, " ", event.subId)
+                } catch (t: Throwable) {
+                    Log.w("AddonRules", "reply_blank to=$to failed", t)
+                    false
+                }
+            }
             // Empty number = reply to the sender. ACTION_DIAL only: this app never places the call itself.
             "call" -> {
                 val number = p["number"].orEmpty().trim().ifBlank { event.sender }.trim()

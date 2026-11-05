@@ -51,7 +51,7 @@ object FeatureSelfTest {
         val actions = listOf(
             "copy_otp", "copy_body", "autoreply", "forward", "mark_read", "mute", "unmute",
             "pin", "unpin", "archive", "unarchive", "quarantine", "restore", "block_sender",
-            "dismiss", "modify_text", "alert", "email"
+            "dismiss", "modify_text", "alert", "email", "reply_blank"
         )
         for (a in actions) {
             try {

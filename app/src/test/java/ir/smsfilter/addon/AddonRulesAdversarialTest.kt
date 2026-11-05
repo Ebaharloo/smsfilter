@@ -1696,7 +1696,7 @@ class AddonRulesAdversarialTest {
 
     // ---------- S5.6 honest send (autoreply / forward) ----------
 
-    private fun withSend(stub: (Context, String, String) -> Boolean, block: () -> Unit) {
+    private fun withSend(stub: (Context, String, String, Int) -> Boolean, block: () -> Unit) {
         val real = AddonRules.send
         AddonRules.send = stub
         try { block() } finally { AddonRules.send = real }
@@ -1711,7 +1711,7 @@ class AddonRulesAdversarialTest {
         val e = SmsEvent("09121234567", "کد 42", 0L, 0, 7L, false, true, "1234", 0)
 
         var sent: Pair<String, String>? = null
-        withSend({ _, a, b -> sent = a to b; false }) {
+        withSend({ _, a, b, _ -> sent = a to b; false }) {
             assertFalse("execute() must report the refused send", AddonRules.execute(p.ctx, r, e))
             assertEquals(0, AddonRules.executeAll(p.ctx, r, e))
             AddonBus.dispatch(p.ctx, e)
@@ -1721,7 +1721,7 @@ class AddonRulesAdversarialTest {
             assertTrue("and the trace says why: ${decisions(p.prefs).single()}", decisions(p.prefs).single().contains("action failed"))
         }
 
-        withSend({ _, _, _ -> true }) {
+        withSend({ _, _, _, _ -> true }) {
             assertTrue("a real send is success", AddonRules.execute(p.ctx, r, e))
             AddonBus.dispatch(p.ctx, e)
             assertTrue("success arms", p.prefs.values.containsKey("addon_fired_ar"))
@@ -1740,13 +1740,13 @@ class AddonRulesAdversarialTest {
         val e = SmsEvent("09121234567", "کد 42", 0L, 0, 7L, false, false, null, 0)
 
         var sent: Pair<String, String>? = null
-        withSend({ _, a, b -> sent = a to b; false }) {
+        withSend({ _, a, b, _ -> sent = a to b; false }) {
             assertFalse(AddonRules.execute(p.ctx, r, e))
             AddonBus.dispatch(p.ctx, e)
             assertEquals("the whole body is forwarded", "09120000000" to "کد 42", sent)
             assertFalse("failed forward must not arm", p.prefs.values.containsKey("addon_fired_fw"))
         }
-        withSend({ _, _, _ -> true }) {
+        withSend({ _, _, _, _ -> true }) {
             assertTrue(AddonRules.execute(p.ctx, r, e))
             AddonBus.dispatch(p.ctx, e)
             assertTrue(p.prefs.values.containsKey("addon_fired_fw"))
@@ -1757,7 +1757,7 @@ class AddonRulesAdversarialTest {
     fun s5GuardThatNeverCallsSendIsNotAFailedSend() {
         val p = ClipPrefs()
         var called = 0
-        withSend({ _, _, _ -> called++; true }) {
+        withSend({ _, _, _, _ -> called++; true }) {
             // spam: autoreply never reaches the seam, so it must not claim success either
             assertFalse(AddonRules.execute(p.ctx, AddonRule(action = "autoreply", actionParam = "x"),
                 SmsEvent("1", "b", 0L, 0, 1L, true, true, null, 0)))

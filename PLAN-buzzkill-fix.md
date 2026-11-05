@@ -135,6 +135,9 @@ Not promoted (see `BUZZKILL-GAP.md` for the reason on each): keyword tree, per-t
 - Correction: BuzzKill's own word mode uses ASCII `\W`, so `رمز` matches inside `رمزنگاری` there too. Our `wholeWordHit` is stricter than BuzzKill; do not "fix" it back.
 
 
+## Target platform
+PHONE ONLY (compact widths ~320–430dp). Waydroid exists only so the app can be seen and tapped during development; it is not a desktop or tablet target. No wide-window layout, no navigation rail, no tablet work, and no passes that measure pixel/font bounds.
+
 ## Definition of done
 - `:app:testDebugUnitTest` green including new adversarial tests.
 - `scripts/gate.sh` green (filter power unchanged: recall 0.88 / kept 0.983 gate).
