@@ -1684,10 +1684,10 @@ class AddonRulesAdversarialTest {
 
         val collidingSender = "09857893333"
         assertEquals(1_283_250, collidingSender.hashCode())
-        assertEquals(1_285 250, smsId(collidingSender))
+        assertEquals(1_285_250, smsId(collidingSender))
         assertEquals(
             "concrete collision: hash in the window + thread id = hash-998000",
-            1_285 250,
+            1_285_250,
             AddonRules.addonNotifyId(evT("x").copy(threadId = 285_250L))
         )
         // probability, stated as arithmetic: 500 000 / 2^32 per address, times the thread aliasing

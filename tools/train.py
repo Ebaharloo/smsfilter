@@ -12,6 +12,7 @@ Feature extraction here is byte-for-byte the same as Model.kt (FNV-1a 32bit over
   python3 tools/train.py            # train both corpora, write assets/model.json, print metrics
 """
 import json
+import os
 import math
 import random
 import sqlite3
@@ -23,7 +24,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from mirror import normalize  # noqa: E402
 
-DATA = Path("~/research/persian_sms")
+DATA = Path(os.path.expanduser("~/research/persian_sms"))
 OUT = HERE.parent / "app" / "src" / "main" / "assets" / "model.json"
 
 M = 1 << 17        # hash buckets

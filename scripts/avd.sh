@@ -22,7 +22,7 @@ fi
 
 if ! adb devices | grep -q emulator; then
   nohup emulator -avd "$AVD" -no-window -no-audio -no-snapshot -gpu swiftshader_indirect \
-    -no-boot-anim -memory 3072 -cores 4 > ~/.hermes/logs/emulator.log 2>&1 &
+    -no-boot-anim -memory 3072 -cores 4 > "${TMPDIR:-/tmp}/emulator.log" 2>&1 &
 fi
 
 echo "waiting for boot..."

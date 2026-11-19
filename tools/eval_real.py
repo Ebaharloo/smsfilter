@@ -12,6 +12,7 @@ No sender field in either corpus => sender rules are inert here; this measures
 content-only precision/recall, which is the worst case.
 """
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mirror import classify  # noqa: E402
 
-DATA = Path("~/research/persian_sms")
+DATA = Path(os.path.expanduser("~/research/persian_sms"))
 
 
 def gheychi():
